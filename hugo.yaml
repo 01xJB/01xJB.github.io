@@ -39,9 +39,26 @@ menu:
       url: "https://www.linkedin.com/in/0xjb/"
       params:
         icon: linkedin
+    - name: Discord
+      weight: 6
+      url: "https://discord.gg/rDYw38Mmw"
+      params:
+        icon: discord
+    - name: AetherGuard CTF
+      weight: 7
+      url: "https://ctf.aetherguard.xyz/"
+      params:
+        icon: flag
 
 params:
   description: Offensive security writeups, CTF walkthroughs, and red team notes.
+
+  theme:
+    default: dark
+    displayToggle: true
+
+  page:
+    width: wide
 
   navbar:
     displayTitle: true
