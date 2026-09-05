@@ -1,0 +1,56 @@
+# Hugo configuration file
+baseURL: https://01xjb.github.io/
+title: 0xJB
+
+# import hextra as module
+module:
+  imports:
+    - path: github.com/imfing/hextra
+
+markup:
+  # allow raw html
+  goldmark:
+    renderer:
+      unsafe: true
+
+  # enable hextra syntax highlight
+  highlight:
+    noClasses: false
+
+menu:
+  main:
+    - name: Writeups
+      pageRef: /writeups
+      weight: 1
+    - name: About
+      pageRef: /about
+      weight: 2
+    - name: Search
+      weight: 3
+      params:
+        type: search
+    - name: GitHub
+      weight: 4
+      url: "https://github.com/01xJB"
+      params:
+        icon: github
+    - name: LinkedIn
+      weight: 5
+      url: "https://www.linkedin.com/in/0xjb/"
+      params:
+        icon: linkedin
+
+params:
+  description: Offensive security writeups, CTF walkthroughs, and red team notes.
+
+  navbar:
+    displayTitle: true
+    displayLogo: false
+
+  footer:
+    displayCopyright: true
+    displayPoweredBy: false
+
+  editURL:
+    enable: true
+    base: "https://github.com/01xJB/01xJB.github.io/edit/main/content"
