@@ -1,9 +1,12 @@
 ---
-title: TryHackMe
+title: "TryHackMe"
 type: docs
-weight: 1
 sidebar:
   open: true
 ---
 
-Room writeups will go here.
+{{< cards >}}
+  {{< card link="koth" title="King of the Hill" >}}
+  {{< card link="linux" title="Linux" >}}
+  {{< card link="windows" title="Windows" >}}
+{{< /cards >}}

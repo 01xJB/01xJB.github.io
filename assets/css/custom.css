@@ -9,6 +9,28 @@ h1 {
   font-family: "JetBrains Mono", ui-monospace, monospace;
 }
 
+/* Obsidian-style callout boxes, converted from writeup notes */
+.callout {
+  border-left: 3px solid;
+  border-radius: 0.375rem;
+  padding: 0.75rem 1rem;
+  margin: 1.25rem 0;
+  background: rgba(255, 255, 255, 0.03);
+}
+.callout p:first-child,
+.callout > *:first-child {
+  margin-top: 0;
+}
+.callout > *:last-child {
+  margin-bottom: 0;
+}
+.callout-info { border-color: #3b82f6; }
+.callout-note { border-color: #14b8a6; }
+.callout-abstract, .callout-summary { border-color: #a855f7; }
+.callout-key { border-color: #eab308; }
+.callout-warning { border-color: #f97316; background: rgba(249, 115, 22, 0.08); }
+.callout-danger, .callout-error { border-color: #ef4444; background: rgba(239, 68, 68, 0.08); }
+
 /* Custom footer quick-links row */
 .custom-footer-links {
   display: flex;
