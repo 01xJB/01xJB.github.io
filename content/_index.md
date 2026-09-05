@@ -20,7 +20,7 @@ Offensive security notes, CTF writeups, and red team research. Founder @ [Aether
   {{< card link="about" title="About" icon="user" subtitle="Who I am and what I work on" >}}
   {{< card link="https://ctf.aetherguard.xyz/" title="AetherGuard CTF" icon="flag" subtitle="Our CTF platform" >}}
   {{< card link="https://discord.gg/rDYw38Mmw" title="Discord" icon="discord" subtitle="Join the community" >}}
-  {{< card link="mailto:jbernal@aetherguard.xyz" title="Email" icon="mail" subtitle="jbernal@aetherguard.xyz" >}}
+  {{< card link="mailto:jbernal@aetherguard.xyz" title="Email" icon="mail" subtitle="Send me an email" >}}
 {{< /cards >}}
 
 <script>
