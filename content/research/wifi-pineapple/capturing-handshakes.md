@@ -77,7 +77,7 @@ To get started:
 
    Example with Hashcat:
 
-   ```
+   ```bash
    hashcat -m 2500 -a 0 handshake.hccapx wordlist.txt
    ```
 3. **Check the Results**:

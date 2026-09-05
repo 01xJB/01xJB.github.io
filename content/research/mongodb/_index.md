@@ -1,7 +1,7 @@
 ---
 title: MongoDB
 type: docs
-weight: 5
+weight: 3
 sidebar:
   open: true
 ---

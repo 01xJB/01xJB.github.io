@@ -82,25 +82,25 @@ Once you have fully set up your `WiFi Pineapple`, follow these steps to configur
 
 1. **SSH into your `WiFi Pineapple`**:
 
-```
+```bash
 ssh root@172.16.42.1  # Enter the password set during setup
 ```
 
 2. **Install `Git` (if not already installed)**:
 
-```
+```bash
 root@172.16.42.1~# opkg update && opkg install git
 ```
 
 3. **Clone the Evil Portals repository into the /root directory**:
 
-```
+```bash
 git clone https://github.com/kleo/evilportals.git
 ```
 
 4. **Navigate to the portals directory to view available portal templates**:
 
-```
+```bash
 cd evilportals/portals/
 ```
 

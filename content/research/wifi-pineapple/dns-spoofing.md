@@ -49,12 +49,12 @@ Make sure the phishing server is accessible and running on a specific IP address
 
 1. Open the `/etc/hosts` file on your `Wifi Pineapple`:
 
-   ```
+   ```bash
     nano /etc/hosts
-   ```
+   ```bash
 2. Add the following line to redirect a domain to the IP address of your phishing server. For instance, if your phishing server is running on IP `172.16.42.15`, and the target domain is `memes.com`, the entry would look like:
 
-   ```
+   ```text
    192.168.1.100   memes.com
    ```
 3. Save the file and exit the editor (`CTRL + X` + `Y` + `ENTER`).
@@ -68,13 +68,13 @@ Make sure the phishing server is accessible and running on a specific IP address
 
 1. Restart the `dnsmasq` service:
 
-   ```
+   ```bash
    /etc/init.d/dnsmasq stop
    /etc/init.d/dnsmasq start
    ```
 2. Verify that `dnsmasq` is running properly:
 
-   ```
+   ```bash
    /etc/init.d/dnsmasq status
    ```
 
@@ -88,7 +88,7 @@ After modifying the `/etc/hosts` file and restarting dnsmasq, you can test the D
 
 1. Open a browser or use `curl` to access the domain you’ve targeted (in this case, `memes.com`):
 
-   ```
+   ```bash
    curl -vv -k memes.com
    ```
 
@@ -96,7 +96,7 @@ The request should be redirected to your phishing server’s landing page.
 
 2. Alternatively, you can use `nslookup` or `dig` to check the DNS resolution:
 
-   ```
+   ```bash
    nslookup memes.com
    ```
 

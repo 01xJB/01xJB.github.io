@@ -1,7 +1,7 @@
 ---
 title: WiFi Pineapple
 type: docs
-weight: 3
+weight: 1
 sidebar:
   open: true
 ---

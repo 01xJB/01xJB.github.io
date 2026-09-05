@@ -16,9 +16,11 @@ Offensive security notes, CTF writeups, and red team research. Founder @ [Aether
 
 {{< cards >}}
   {{< card link="writeups" title="Writeups" icon="book-open" subtitle="TryHackMe, HackTheBox, and other CTF walkthroughs" >}}
+  {{< card link="research" title="Research" icon="beaker" subtitle="WiFi Pineapple, radio hacking, and MongoDB exposure research" >}}
   {{< card link="about" title="About" icon="user" subtitle="Who I am and what I work on" >}}
   {{< card link="https://ctf.aetherguard.xyz/" title="AetherGuard CTF" icon="flag" subtitle="Our CTF platform" >}}
-  {{< card link="https://discord.gg/rDYw38Mmw" title="Discord" icon="discord" subtitle="Join the AetherGuard CTF community" >}}
+  {{< card link="https://discord.gg/rDYw38Mmw" title="Discord" icon="discord" subtitle="Join the community" >}}
+  {{< card link="mailto:jbernal@aetherguard.xyz" title="Email" icon="mail" subtitle="jbernal@aetherguard.xyz" >}}
 {{< /cards >}}
 
 <script>

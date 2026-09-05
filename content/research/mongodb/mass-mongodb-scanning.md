@@ -26,13 +26,13 @@ MongoSmash is a Python tool designed to scan a list of IP addresses, attempt to 
 
 1. **Clone the Repository**:
 
-   ```
+   ```bash
    git clone https://github.com/01xJB/mongosmash.git
    cd mongosmash
    ```
 2. **Install Dependencies**:
 
-   ```
+   ```bash
    pip install -r requirements.txt
    ```
 
@@ -48,7 +48,7 @@ There are a few ways to scan the internet with `masscan`: you can scan specific 
 
 The method below scans the entire internet at a max rate of `100000`, which uses significant bandwidth and sends a **LOT OF PACKETS**, giving you results the fastest. I'd recommend lowering `--max-rate` to `2000` or something well below `100000` for a less aggressive scan.
 
-```
+```bash
 masscan 0.0.0.0/0 --exclude 255.255.255.255 -p 27017 --max-rate 100000 > 0.0.0.0-masscan.lst
 ```
 
@@ -58,25 +58,25 @@ Now that you have your list of IP addresses in `0.0.0.0-masscan.lst` you can now
 
 Here is an example of scanning with your target subnet range.
 
-```
+```bash
 masscan 172.15.14.0/0 --exclude 255.255.255.255 -p 27017 --max-rate 100000 > 172.15.14.0-masscan.lst
 ```
 
 After you scan something it is going to look like this `Discovered open port 27017/tcp on 172.15.14.15`. We need a list of just IP addresses and we can parse the IP addresses by using the `sed` command on linux.
 
-```
+```bash
 sed -i 's@Discovered open port 27017/tcp on @@g' 172.15.14.0-masscan.lst
 ```
 
 This will now give you a list of just IP addresses now we need to parse out all of the spaces that are in the file we can do that with `sed` once more.
 
-```
+```bash
 sed -i 's/ //g' 172.15.14.0-masscan.lst
 ```
 
 Now it really is just IP addresses. From here we can now just `mongosmash` by doing the following.
 
-```
+```bash
 python3 mongosmash.py -i 172.15.14.0-masscan.lst --threads=25
 ```
 

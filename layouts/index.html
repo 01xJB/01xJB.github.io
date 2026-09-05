@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="{{ .Site.Language.Lang }}" dir="{{ partial "utils/hugo-compat/language-direction.html" .Site.Language | default `ltr` }}">
+  {{- partial "head.html" . -}}
+  <body>
+    <a href="#content" class="hx:sr-only hx:focus-visible:not-sr-only hx:focus-visible:fixed hx:focus-visible:z-50 hx:focus-visible:top-2 hx:focus-visible:left-2 hx:focus-visible:bg-primary-500 hx:focus-visible:text-white hx:focus-visible:px-4 hx:focus-visible:py-2 hx:focus-visible:rounded-md hx:focus-visible:text-sm hx:focus-visible:font-medium">
+      {{- (T "skipToContent") | default "Skip to content" -}}
+    </a>
+    {{- partial "banner.html" . -}}
+    {{- partial "navbar.html" . -}}
+
+    <div class='hx:mx-auto hx:flex hextra-max-page-width'>
+      {{ partial "sidebar.html" (dict "context" . "disableSidebar" true "displayPlaceholder" true) }}
+      {{ partial "toc.html" . }}
+      <article class="hx:w-full hx:break-words hx:flex hx:min-h-[calc(100vh-var(--navbar-height))] hx:min-w-0 hx:justify-center hx:pb-8 hx:pr-[calc(env(safe-area-inset-right)-1.5rem)]">
+        <main id="content" class="hx:w-full hx:min-w-0 hextra-max-content-width hx:px-6 hx:pt-4 hx:md:px-12">
+          <div class="content">
+            {{ .Content }}
+          </div>
+
+          {{- $recent := where site.RegularPages "Section" "in" (slice "writeups" "research") -}}
+          {{- $recent = sort $recent "Date" "desc" -}}
+          {{- $recent = first 6 $recent -}}
+          {{- if $recent }}
+          <h2 id="latest" class="hx:mt-8 hx:text-2xl hx:font-bold hx:tracking-tight">Latest</h2>
+          <div class="hextra-cards hx:mt-4 hx:gap-4 hx:grid not-prose" style="--hextra-cards-grid-cols: 3;">
+            {{- range $recent }}
+              {{- $tags := "" -}}
+              {{- with .Params.tags -}}{{ $tags = delimit . ", " }}{{- end -}}
+              {{- partial "shortcodes/card" (dict
+                "link" .RelPermalink
+                "title" .Title
+                "subtitle" $tags
+                "tag" (.Date.Format "Jan 2006")
+                "icon" "document-text"
+              ) }}
+            {{- end }}
+          </div>
+          {{- end }}
+        </main>
+      </article>
+    </div>
+
+    {{- if or (eq .Site.Params.footer.enable nil) (.Site.Params.footer.enable) }}
+      {{ partial "footer.html" . }}
+    {{ end }}
+    {{ partial "scripts.html" . }}
+  </body>
+</html>

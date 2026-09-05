@@ -1,7 +1,7 @@
 ---
 title: Radio Hacking
 type: docs
-weight: 4
+weight: 2
 sidebar:
   open: true
 ---
