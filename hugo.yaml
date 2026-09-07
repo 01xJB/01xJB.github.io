@@ -23,8 +23,8 @@ menu:
     - name: Writeups
       pageRef: /writeups
       weight: 1
-    - name: Research
-      pageRef: /research
+    - name: Red Team Handbook
+      pageRef: /handbook
       weight: 2
     - name: About
       pageRef: /about

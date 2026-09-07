@@ -48,7 +48,7 @@ Running both sides (attacker and defender) on infrastructure I own is what keeps
 
 ## Bug Bounty & Research
 
-Active in bug bounty hunting and independent security research, with a focus on network services, wireless attack surfaces, and application-layer vulnerabilities. Some of that research ends up written up on the [Research](/research/) and [Writeups](/writeups/) sections of this site.
+Active in bug bounty hunting and independent security research, with a focus on network services, wireless attack surfaces, and application-layer vulnerabilities. Some of that research ends up written up in the [Red Team Handbook](/handbook/) and [Writeups](/writeups/) sections of this site.
 
 ## Let's Connect
 

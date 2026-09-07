@@ -17,7 +17,7 @@
             {{ .Content }}
           </div>
 
-          {{- $recent := where site.RegularPages "Section" "in" (slice "writeups" "research") -}}
+          {{- $recent := where site.RegularPages "Section" "in" (slice "writeups" "handbook") -}}
           {{- $recent = sort $recent "Date" "desc" -}}
           {{- $recent = first 6 $recent -}}
           {{- if $recent }}
