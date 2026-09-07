@@ -196,6 +196,9 @@ With the real administrator's password now mine, I tried it against phpMyAdmin a
 ```
 
 
+While digging through the static assets nikto turned up, I noticed a chunk of the site's own front-end source leaking useful detail: directory names, the admin panel's template markup, and a full list of the JS bundles it loads.
+
+```html
  fontawe
 
  assets
@@ -241,11 +244,13 @@ $(function() {
 <link rel="stylesheet" type="text/css" href="../assets/css/daterangepicker.css" />
   </body>
   <!-- response -->
-
+```
 
   The admin panel's profile-image upload feature was next. I intercepted the request in Burp and checked the response carefully, since nothing on the server side appeared to validate that the uploaded file was actually an image, so I swapped in a PHP reverse shell instead and used the response to work out exactly where the application had stored it on disk.
 
+```
   /v2/profileimages/
+```
 
 
 ```bash

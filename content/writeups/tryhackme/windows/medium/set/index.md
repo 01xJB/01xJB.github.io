@@ -18,7 +18,7 @@ tags:
 
 <div class="callout callout-note">
 
-Second run at the **SET** box (a later `v7` revision). See also **[SET (Medium)](/writeups/tryhackme/windows/medium/set/)** and ****SET (raw notes) (Medium)****. Full recorded notes for this run below.
+A later, more complete run at the **SET** box. Full recorded notes below.
 
 </div>
 
@@ -48,10 +48,9 @@ SET is one of a handful of TryHackMe rooms built around the fictional **Windcorp
 
 I start the way I start most Windows AD boxes: `enum4linux-ng` first, to see whether anonymous SMB gives up anything for free, before committing to a full port sweep.
 
+```console
 ❯ python3 enum4linux-ng.py 10.10.228.78 -A
 ENUM4LINUX - next generation
-
-```console
  ==========================
 |    Target Information    |
  ==========================
@@ -149,6 +148,7 @@ Server type string: null
 
 `enum4linux-ng` only checks the handful of ports it cares about, so I follow up with `rustscan` for full-range coverage and let it hand off to `nmap` for service detection on whatever comes back.
 
+```console
 ❯ rustscan -a 10.10.228.78 -- -p-
 .----. .-. .-. .----..---.  .----. .---.   .--.  .-. .-.
 | {}  }| { } |{ {__ {_   _}{ {__  /  ___} / {} \ |  `| |
@@ -175,6 +175,7 @@ Depending on the complexity of the script, results may take some time to appear.
 Only 1 -p option allowed, separate multiple ranges with commas.
 QUITTING!
 [!] Error Exit code = 1
+```
 
 Port `5985` open with no session established yet is worth remembering, WinRM is going to be my eventual way in, I just need credentials to go with it. I re-run the service scan manually since rustscan's script hand-off errored out.
 
@@ -243,6 +244,7 @@ Nothing dramatic there beyond the usual missing security headers, but between th
 
 Before committing fully to the web app angle, I want to know if there's anything else reachable on the same segment. An `nbtscan` sweep across the `/24` turns up a second machine I hadn't seen in any of the scans against `.78`.
 
+```console
 ❯ k1b0r@pwned~/thm/Set_v7 
 ❯ sudo nbtscan -r 10.10.228.78/24
 Doing NBT name scan for addresses from 10.10.228.78/24
@@ -282,11 +284,15 @@ Depending on the complexity of the script, results may take some time to appear.
 Only 1 -p option allowed, separate multiple ranges with commas.
 QUITTING!
 [!] Error Exit code = 1
+```
 
 We discovered another node under the network. `enum4linux-ng` against it confirms something SET itself never gave me: an actual anonymous SMB session.
 
+```console
 python3 enum4linux-ng.py -A 10.10.228.57
 ENUM4LINUX - next generation
+```
+
 
 ```console
  ==========================
