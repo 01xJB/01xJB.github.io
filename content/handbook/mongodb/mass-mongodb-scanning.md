@@ -8,37 +8,48 @@ tags:
   - MongoDB
   - Scanning
   - Authentication
+  - Red Team Tooling
 ---
 
-## What is Mongosmash
+## What is MongoSmash
 
-MongoSmash is a Python tool designed to scan a list of IP addresses, attempt to authenticate with MongoDB instances, and recursively download their databases if access is granted without authentication.
+[MongoSmash](https://github.com/01xJB/mongosmash) is a multithreaded Python tool I built to scan a list of IPs (or CIDR ranges) for MongoDB instances exposed with no authentication, then recursively pull down whatever databases and collections it finds. It started as a quick script for confirming exposure during recon, and it's grown into something I now install as an actual CLI command rather than a one-off script.
 
 ## Features
 
-- **IP Address Scanning**: Efficiently scans a list of provided IP addresses.
-- **MongoDB Authentication Attempts**: Tries to authenticate with each IP address.
-- **Recursive Database Download**: Downloads databases recursively upon successful authentication.
-- **Logging**: Detailed logging with Rich for better readability.
-- **Multithreading**: Uses multiple threads to speed up the scanning process.
+- **Bulk IP and CIDR scanning**: feed it a plain list of targets, or drop a `10.0.0.0/24`-style range straight into the target file and it expands automatically
+- **Single-host quick mode**: `-H <ip>` scans one target without needing a file at all, handy for a fast one-off check
+- **Auth-bypass detection**: attempts a connection and flags instances that accept it with zero credentials
+- **Weak-credential checks**: `--creds wordlist.txt` (`user:pass` per line) tries common credentials against instances that *do* require authentication, instead of just logging "requires auth" and moving on
+- **Version fingerprinting**: pulls the MongoDB version off exposed instances via `buildInfo`, useful for matching against known CVEs afterward
+- **Recursive, properly-serialized data pull**: walks every database and collection and dumps valid JSON (BSON types like `ObjectId` and dates included), with a per-collection document cap (`--limit`) so one huge collection can't hang the whole run
+- **Detection-only mode**: `--no-dump` confirms exposure without pulling any data, for a lighter first pass before deciding what to pull
+- **Configurable port, timeout, and pacing**: `-p/--port` for non-default setups, `--timeout`, and `--delay` for a gentler, stealthier scan
+- **Multithreaded with a live progress bar**: configurable worker pool, graceful Ctrl+C handling instead of a raw traceback
+- **Engagement-ready output**: every run writes both a `summary.json` and a `report.md` you can drop straight into a deliverable
+- **Rich console output**: color-coded logging, including a dedicated `PWNED` log level for hits
 
-## Installation 🤖
+## Installation
 
-1. **Clone the Repository**:
+The easiest way is to grab the built wheel from the [latest release](https://github.com/01xJB/mongosmash/releases) and pip install it directly, which gives you a `mongosmash` command:
 
-   ```bash
-   git clone https://github.com/01xJB/mongosmash.git
-   cd mongosmash
-   ```
-2. **Install Dependencies**:
+```bash
+pip install https://github.com/01xJB/mongosmash/releases/latest/download/mongosmash-3.2.0-py3-none-any.whl
+mongosmash --help
+```
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+Or run it from source if you'd rather:
+
+```bash
+git clone https://github.com/01xJB/mongosmash.git
+cd mongosmash
+pip install -r requirements.txt
+python3 mongosmash.py --help
+```
 
 ## Scanning For MongoDB Servers 🥭
 
-The most effective way to use `mongosmash` is to scan the internet for MongoDB servers to feed into `mongosmash`. Internet scanning itself is not illegal, but what you do with the results can absolutely be illegal depending on intent. **USE THIS ETHICALLY!**
+The most effective way to use `mongosmash` is to scan the internet for MongoDB servers to feed into it. Internet scanning itself is not illegal, but what you do with the results can absolutely be illegal depending on intent. **USE THIS ETHICALLY!**
 
 ### Port scan with **masscan**
 
@@ -54,35 +65,60 @@ masscan 0.0.0.0/0 --exclude 255.255.255.255 -p 27017 --max-rate 100000 > 0.0.0.0
 
 ## Using your IP list with mongosmash
 
-Now that you have your list of IP addresses in `0.0.0.0-masscan.lst` you can now use `mongosmash` to mass authenticate with them to locate unauthenticated mongodb servers, this can be really useful if you are in a pentest engagement, you could use the IP range of your target.
-
-Here is an example of scanning with your target subnet range.
+Now that you have your list of IPs in `0.0.0.0-masscan.lst`, use `mongosmash` to mass-check them for unauthenticated access. This is especially useful on an actual pentest engagement, where you'd point it at your target's IP range instead.
 
 ```bash
 masscan 172.15.14.0/0 --exclude 255.255.255.255 -p 27017 --max-rate 100000 > 172.15.14.0-masscan.lst
 ```
 
-After you scan something it is going to look like this `Discovered open port 27017/tcp on 172.15.14.15`. We need a list of just IP addresses and we can parse the IP addresses by using the `sed` command on linux.
+After you scan something it's going to look like this: `Discovered open port 27017/tcp on 172.15.14.15`. We need a list of just IP addresses, which we can get with `sed`:
 
 ```bash
 sed -i 's@Discovered open port 27017/tcp on @@g' 172.15.14.0-masscan.lst
-```
-
-This will now give you a list of just IP addresses now we need to parse out all of the spaces that are in the file we can do that with `sed` once more.
-
-```bash
 sed -i 's/ //g' 172.15.14.0-masscan.lst
 ```
 
-Now it really is just IP addresses. From here we can now just `mongosmash` by doing the following.
+Now it's just a plain IP list (or you could've skipped straight to `172.15.14.0/24` in the target file and let mongosmash expand the CIDR itself). Feed it in:
 
 ```bash
-python3 mongosmash.py -i 172.15.14.0-masscan.lst --threads=25
+mongosmash -i 172.15.14.0-masscan.lst -t 25
 ```
+
+### Quick single-host checks
+
+If I just need to confirm one box without building a target file:
+
+```bash
+mongosmash -H 172.15.14.15
+```
+
+### Checking weak credentials, not just no-auth
+
+A lot of real-world MongoDB exposure isn't "no auth at all", it's "auth enabled with a default or trivially weak password". `--creds` tries a wordlist of `user:pass` pairs against anything that comes back requiring authentication, instead of stopping at "requires auth" and losing that finding:
+
+```bash
+mongosmash -i targets.txt --creds common-mongo-creds.txt
+```
+
+### Fingerprinting for CVE matching
+
+Every exposed instance now reports its MongoDB version (pulled via `buildInfo`), which I use to quickly cross-reference against known MongoDB CVEs for that version rather than guessing at what's patched.
+
+### Keeping a lower profile
+
+`--delay` adds a pause before each connection attempt, and `--no-dump` skips pulling data entirely, useful for an initial detection-only pass before deciding what's worth actually pulling:
+
+```bash
+mongosmash -i targets.txt --no-dump --delay 0.5
+```
+
+### Reading the results
+
+Every run writes two files alongside the dumped data: `.mongosmash/summary.json` (machine-readable counts and per-host results) and `.mongosmash/report.md` (a Markdown table of every exposed instance, its version, and how it was accessed) that I paste straight into an engagement report.
 
 ## Mitigation Strategies
 
-To defend against threat actors accessing your `mongodb` servers, make sure you have proper authentication enabled, and either set up a whitelist for authorized IP addresses or make your database only accessible through a private VPN.
+To defend against threat actors accessing your `mongodb` servers, make sure you have proper authentication enabled, use credentials that aren't in any common wordlist, and either set up a whitelist for authorized IP addresses or make your database only accessible through a private VPN. Keep MongoDB patched, since an outdated, exposed instance is a fingerprintable, easy target.
 
 ## Conclusion
 
