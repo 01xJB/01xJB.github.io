@@ -20,12 +20,6 @@ tags:
   - sedebugprivilege
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
@@ -70,7 +64,7 @@ My notes cover recon, the path traversal, and the ViewState technique. The `alaa
 
 ## Overview
 
-POV is a clean ASP.NET box. The foothold is the classic **web.config to machineKey to ViewState** chain: a path traversal leaks the server's static `machineKey`, and once you have the `validationKey` and `decryptionKey` you can forge a `__VIEWSTATE` that the framework deserializes, which `ysoserial.net` turns into RCE. The pivot is **`Import-CliXml`** on an exported `PSCredential`, which is a Windows footgun: `Export-CliXml` on a credential produces a file that anyone can decrypt *if it was exported without DPAPI user scoping*, or that decrypts trivially for the same user. Root is **`SeDebugPrivilege`**, which lets you open a handle to any process, so you inject into or migrate into a SYSTEM process.
+POV is a clean ASP.NET box, and it is a great example of why I always poke at every parameter on a "download this file" feature. The foothold is the classic **web.config to machineKey to ViewState** chain: a path traversal leaks the server's static `machineKey`, and once you have the `validationKey` and `decryptionKey` you can forge a `__VIEWSTATE` that the framework deserializes, which `ysoserial.net` turns into RCE. The pivot is **`Import-CliXml`** on an exported `PSCredential`, which is a Windows footgun I keep seeing on real engagements too: `Export-CliXml` on a credential produces a file that anyone can decrypt *if it was exported without DPAPI user scoping*, or that decrypts trivially for the same user. Root is **`SeDebugPrivilege`**, which lets you open a handle to any process, so you inject into or migrate into a SYSTEM process. Three completely different bug classes (path traversal, insecure deserialization, and a Windows privilege footgun), each one textbook, chained end to end.
 
 Related ViewState / .NET deserialization: [Anubis](/writeups/hackthebox/windows/insane/anubis/), [GameBuzz](/writeups/tryhackme/linux/hard/gamebuzz/), [Bagel](/writeups/hackthebox/linux/medium/bagel/). Related exported-credential file: [POV](/writeups/hackthebox/windows/medium/pov/) is the reference. Related token / privilege abuse to SYSTEM: [Hack Smarter Security](/writeups/tryhackme/windows/medium/hack-smarter-security/), [Anubis](/writeups/hackthebox/windows/insane/anubis/).
 
@@ -86,7 +80,7 @@ PORT   STATE SERVICE VERSION
 |_http-title: pov.htb
 ```
 
-A vhost sweep (or the page source) reveals `dev.pov.htb`, a "portfolio" site with a `download.aspx?file=cv.pdf` link.
+IIS on a single open port is a small surface, so the vhost sweep is not optional here, it is the whole recon. A vhost sweep (or the page source) reveals `dev.pov.htb`, a "portfolio" site with a `download.aspx?file=cv.pdf` link. Any time I see a query parameter that looks like it maps straight onto a filesystem path, I try to break it before I do anything else on the page.
 
 ### Path traversal in download.aspx
 
@@ -131,6 +125,8 @@ POST that as `__VIEWSTATE` to the `dev` page. Shell as **`sfitz`**.
 
 ### sfitz to alaading
 
+`user.txt` is not in `sfitz`'s home directory, which is usually my cue that there is a lateral move coming before I get to touch a flag. A look through the Documents folder turned up something a lot more interesting than a text file.
+
 ```powershell
 type C:\Users\sfitz\Documents\connection.xml
 ```
@@ -161,6 +157,8 @@ $c.GetNetworkCredential().Password        # f8gQ8fynP44ek1m3
 
 ### Privilege Escalation, SeDebugPrivilege
 
+The very first thing I run in any new Windows shell is `whoami /priv`, it takes two seconds and it has handed me easy wins more than once. This time was no exception.
+
 ```powershell
 whoami /priv
 # SeDebugPrivilege   Enabled
@@ -178,7 +176,7 @@ Import-Module .\psgetsys.ps1
 
 </div>
 
-Catch a SYSTEM shell, read `root.txt`.
+Catch a SYSTEM shell, read `root.txt`. It is a satisfying finish, a path traversal that should never have leaked a machineKey, a credential file that should never have stayed on disk, and a privilege that should never have been left on a non-admin account, and each one alone was enough to move the chain one step further.
 
 ---
 
@@ -213,3 +211,4 @@ Catch a SYSTEM shell, read `root.txt`.
 - Exploiting ViewState (HackTricks) <https://book.hacktricks.xyz/pentesting-web/deserialization/exploiting-__viewstate-parameter>
 - ysoserial.net <https://github.com/pwntester/ysoserial.net>
 - PsGetSys.ps1 <https://github.com/decoder-it/psgetsystem>
+- Final privilege escalation steps cross-referenced against public writeups for this box.

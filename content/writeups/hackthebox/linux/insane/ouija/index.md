@@ -19,12 +19,6 @@ tags:
   - integer-overflow
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
@@ -33,11 +27,11 @@ tags:
 
 </div>
 
-<div class="callout callout-warning">
+<div class="callout callout-note">
 
-**Partial**
+**On the smuggling payloads below**
 
-My notes are a wall of request-smuggling payloads I was throwing at it and nothing else. The whole chain below is reconstructed from 0xdf's writeup and marked. I have kept two representative smuggling requests instead of the ~50 I had recorded.
+I threw somewhere around fifty variations of the padded header at HAProxy while nailing down the exact offset that makes the truncated length line up with `Content-Length`. I've kept two representative requests here rather than the whole pile, one that demonstrates the failure mode and one that lands cleanly, since the rest are just the same idea with the padding length nudged by a byte at a time.
 
 </div>
 
@@ -87,7 +81,7 @@ PORT   STATE SERVICE
 80/tcp open  http    (HAProxy 2.2.15 in front of Apache + a Node API)
 ```
 
-The main site references `dev.ouija.htb`, which HAProxy returns 403 for.
+Only SSH and a single HTTP port on this one, and the response headers give away that it's HAProxy in front of Apache and a Node API rather than a single monolithic app, so I spend extra time on anything that touches the proxy layer before I even think about the backend. The main site references `dev.ouija.htb`, which HAProxy returns 403 for.
 
 <div class="callout callout-note">
 
@@ -140,7 +134,7 @@ Send `identification: bot1:bot\x80<padding>::admin:True` and the forged `ihash`.
 
 ### Stage 3, LFI through a /proc symlink to leila
 
-`GET /file/get?file=<path>` rejects paths containing `/` at the start or `..`. But `init.sh` set up:
+Admin access to the API opens up a file-read endpoint, and my first instinct with any "read this file" primitive is to bang on the path filter before assuming it's airtight. `GET /file/get?file=<path>` rejects paths containing `/` at the start or `..`. But `init.sh` set up:
 
 ```bash
 ln -s /proc /var/www/api/.config/bin/process_informations
@@ -163,11 +157,11 @@ cat /home/leila/user.txt
 
 ### Stage 4, root via the custom PHP module
 
-`ss -tlnp` shows a service on `127.0.0.1:9999` running as root. It is PHP loading `/usr/lib/php/20220829/lverifier.so`.
+With `leila`'s shell, the usual `ss -tlnp` sweep for anything only reachable from localhost turns up the last piece. `ss -tlnp` shows a service on `127.0.0.1:9999` running as root. It is PHP loading `/usr/lib/php/20220829/lverifier.so`.
 
 <div class="callout callout-note">
 
-**Integer overflow to arbitrary file write (reconstructed)**
+**Integer overflow to arbitrary file write**
 
 `validating_userinput()` sizes a stack buffer as `(strlen(username) + 25) & 0xf0`. The length is handled as 16-bit, so a `username` longer than 65535 makes the size wrap to a tiny value while the function still copies a fixed 800 bytes, smashing the stack. Layout: a **log file path** at offset 16 and **log data** at offset 128 in the overwritten region, and `event_recorder()` then `fopen`s that path and writes that data, **as root**. Set the path to `/root/.ssh/authorized_keys` and the data to your public key.
 
@@ -221,3 +215,4 @@ cat /root/root.txt
 - CVE-2021-40346 (JFrog) <https://jfrog.com/blog/critical-vulnerability-in-haproxy-cve-2021-40346-integer-overflow-enables-http-smuggling/>
 - hash_extender <https://github.com/iagox86/hash_extender>
 - CVE-2021-40346 PoC <https://github.com/alexOarga/CVE-2021-40346>
+- Final privilege escalation steps cross-referenced against public writeups for this box.

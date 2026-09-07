@@ -54,9 +54,9 @@ tags:
 
 ## Overview
 
-Nexus is a long "chain of five" easy box that is really about following credentials and version numbers from one service to the next. Two vhosts (Krayin CRM and a self hosted Gitea), three application CVEs, one password reused three times, one secret buried in git history that turns out to be a rabbit hole, and a writable script inside a root systemd oneshot for the finish. Nothing needs custom exploitation, but you have to keep careful notes: which credential unlocks which account, which Gitea repo holds what, and that the Gitea process runs as the `git` system user directly on the host (not in a container), so RCE against it is a real local shell.
+Nexus turned out to be a long "chain of five" easy box, and what made it interesting wasn't any single exploit but the discipline of following credentials and version numbers from one service to the next without losing the thread. I found two vhosts (Krayin CRM and a self-hosted Gitea instance), chained three separate application CVEs, watched one password get reused three separate times, chased a secret buried in git history that turned out to be an older, dead-end credential, and finished the box off through a writable script sitting inside a root-owned systemd oneshot. None of the individual steps required custom exploit development, but the box punished sloppy note-taking: I had to track which credential unlocked which account, which Gitea repository held which secret, and, critically, that the Gitea process ran as the `git` system user directly on the host rather than inside a container, which meant any RCE against Gitea would land as a real local shell rather than a throwaway sandbox.
 
-Related Gitea boxes: [Cat](/writeups/hackthebox/linux/medium/cat/), [Titanic](/writeups/hackthebox/linux/easy/titanic/), [Drive](/writeups/hackthebox/linux/hard/drive/). Related "app `.env` then password reuse to a system user": [TwoMillion](/writeups/hackthebox/linux/easy/twomillion/), [Nocturnal](/writeups/hackthebox/linux/easy/nocturnal/). Related "writable script in a root service/cron": [Monitored](/writeups/hackthebox/linux/medium/monitored/), [Inject](/writeups/hackthebox/linux/easy/inject/), [Pilgrimage](/writeups/hackthebox/linux/easy/pilgrimage/).
+I've tied this into a few other boxes I've written up that share pieces of this chain. On the Gitea side there's [Cat](/writeups/hackthebox/linux/medium/cat/), [Titanic](/writeups/hackthebox/linux/easy/titanic/), and [Drive](/writeups/hackthebox/linux/hard/drive/). For the "leaked `.env` leads to password reuse on a system account" pattern, I'd point to [TwoMillion](/writeups/hackthebox/linux/easy/twomillion/) and [Nocturnal](/writeups/hackthebox/linux/easy/nocturnal/). And for the "writable script inside a root service or cron job" finish, [Monitored](/writeups/hackthebox/linux/medium/monitored/), [Inject](/writeups/hackthebox/linux/easy/inject/), and [Pilgrimage](/writeups/hackthebox/linux/easy/pilgrimage/) all follow the same shape.
 
 ---
 
@@ -71,7 +71,7 @@ nmap -vv -sC -sV -T4 -Pn 10.129.109.226 --script=http-headers,vuln
 ```console
 PORT   STATE SERVICE VERSION
 22/tcp open  ssh     OpenSSH 9.6p1 Ubuntu 3ubuntu13.16 (Ubuntu Linux; protocol 2.0)
-|   [vulners: SSH 9.6p1 — long CVE list, nothing directly exploitable here]
+|   [vulners: SSH 9.6p1 - long CVE list, nothing directly exploitable here]
 80/tcp open  http    nginx 1.24.0 (Ubuntu)
 | http-headers:
 |   Server: nginx/1.24.0 (Ubuntu)
@@ -110,7 +110,7 @@ $ python3 poc_cve-2026-41452.py http://billing.nexus.htb baphomet pwned@attacker
 [*] Target: http://billing.nexus.htb
 [*] New admin: baphomet <pwned@attacker.local> / P@ssw0rd123!
 [0] NON-AJAX POST -> HTTP 302 Location=http://billing.nexus.htb/admin/dashboard
-    [OK] blocked by CanInstall (redirect to /admin/dashboard) — middleware works
+    [OK] blocked by CanInstall (redirect to /admin/dashboard) - middleware works
 ```
 
 ### 2. Unrestricted file upload → RCE, CVE-2026-38526

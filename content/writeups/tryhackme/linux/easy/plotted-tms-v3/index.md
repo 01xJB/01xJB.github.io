@@ -33,7 +33,7 @@ tags:
 
 ## Full Walkthrough
 
-Nmap scan
+I started, as always, with an nmap scan across the box to see what was actually exposed before touching anything manually:
 
 ```bash
 Reason: 997 conn-refused
@@ -63,6 +63,8 @@ Host script results:
 |_smb2-time: Protocol negotiation failed (SMB2)
 ```
 
+Both `80` and `445` came back running Apache with the same generic Ubuntu default page, which told me nothing on its own, so I ran a follow-up scan focused on port `445` specifically before moving over to manual browsing, since two identical-looking web servers on different ports is usually a sign that one of them is hiding something behind a different vhost or path:
+
 ```bash
 PORT    STATE SERVICE REASON  VERSION
 445/tcp open  http    syn-ack Apache httpd 2.4.41 ((Ubuntu))
@@ -83,13 +85,9 @@ Host script results:
 |_smb2-time: Protocol negotiation failed (SMB2)
 ```
 
-got rce from ## Traffic Offense Management System - Admin Login
+Browsing to port `445` directly turned up something port `80` never showed me: an admin login panel for a Traffic Offense Management System. It was vulnerable enough to hand me remote code execution outright, and from there I dropped a web shell running as `www-data`.
 
-things found with linpeas
-
-got credentials from initialize.php logged into db
-
-dump users
+Digging into the application source with that shell, I found that `initialize.php` leaked the database credentials in cleartext, so I connected to MySQL myself and dumped the `users` table to see what accounts existed and how the application's authentication was structured. From that same foothold, I ran linpeas to sweep the box for privilege escalation opportunities, and a few entries in its output caught my attention right away:
 
 ```bash
 ╔══════════╣ Container related tools present
@@ -118,18 +116,17 @@ permit nopass plot_admin as root cmd openssl
 
 ```
 
-The user runs that `backup.sh` file as that user.
+That cron entry immediately caught my eye: `plot_admin` runs `/var/www/scripts/backup.sh` on a schedule, which meant the script executes with `plot_admin`'s privileges every single time cron kicks it off.
 
-as `www-data` we can rename that file and when the cron kicks it we can make another file that spawns a shell or maybe even make  SUID file with that user so we can do `bash -p ` to get into that user.
-
+Since I was running as `www-data`, and `www-data` had write access to that script, my plan was straightforward: overwrite `backup.sh` with my own version, wait for cron to run it as `plot_admin`, and have my replacement drop a SUID copy of `bash` rather than a one-shot reverse shell, since a SUID binary meant I could come back and invoke `bash -p` whenever I wanted a stable shell as `plot_admin` instead of only getting one shot at it.
 
 ![Pasted image 20240206163430](Pasted-image-20240206163430.png)
 
-got user now `root`.
+That trick worked cleanly, and with a shell as `plot_admin` in hand, the `doas.conf` entry I had already spotted in the linpeas output became the obvious next target: `plot_admin` can run `openssl` as root with no password at all.
 
 ![Pasted image 20240206170336](Pasted-image-20240206170336.png)
 
-get root flag
+With that `doas` rule confirmed, reading `root.txt` did not even require an interactive root shell. `openssl enc` without an explicit cipher just passes its input straight through rather than encrypting anything meaningful, so running it through `doas` as root effectively turns it into an arbitrary-file-read primitive, a trick straight out of GTFOBins:
 
 ```bash
 doas -u root openssl enc -in /root/root.txt

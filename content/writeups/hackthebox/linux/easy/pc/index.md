@@ -51,9 +51,9 @@ tags:
 
 ## Overview
 
-PC is the box that teaches **gRPC is just another web API you have to enumerate**. Most people freeze at "port 50051, unknown service", but gRPC servers very often ship with **server reflection** turned on, which is the gRPC equivalent of a Swagger doc: `grpcurl -plaintext host:50051 list` gives you every service and method, and `grpcui` renders a clickable form. Once you can call methods, the vulnerability is boring and familiar: a parameter (`id`) goes straight into a SQL query. The privesc is a clean N-day, **pyLoad CVE-2023-0297**, on a service the developer assumed was safe because it only listened on localhost.
+What I took away from PC more than anything else is that **gRPC is just another web API you have to enumerate**, even though the first instinct when you see an unfamiliar port is to assume it's some exotic, opaque protocol you can't touch. A lot of people freeze the moment nmap reports "port 50051, unknown service", but I've learned that gRPC servers very often ship with **server reflection** turned on, and that feature is effectively the gRPC equivalent of a Swagger document. A single `grpcurl -plaintext host:50051 list` call handed me every service and method the server exposes, and `grpcui` went a step further and rendered the whole thing as a clickable form I could interact with directly in the browser. Once I could actually call methods, the underlying vulnerability turned out to be refreshingly familiar: a parameter, `id` in this case, gets concatenated straight into a SQL query with no sanitization. The privilege escalation side was a clean N-day, **pyLoad CVE-2023-0297**, sitting on a service the developer clearly assumed was safe purely because it only listened on localhost.
 
-Related unusual-protocol boxes: [Antique](/writeups/hackthebox/linux/easy/antique/) (JetDirect), [Backdoor](/writeups/hackthebox/linux/easy/backdoor/) (gdbserver). Related SQLi-with-sqlmap: [Cat](/writeups/hackthebox/linux/medium/cat/), [Monitored](/writeups/hackthebox/linux/medium/monitored/), [Usage](/writeups/hackthebox/linux/easy/usage/). Related "localhost-only service, tunnel and pop": [MonitorsTwo](/writeups/hackthebox/linux/easy/monitorstwo/), [Nocturnal](/writeups/hackthebox/linux/easy/nocturnal/), [Monitored](/writeups/hackthebox/linux/medium/monitored/).
+I think of this alongside the other unusual-protocol boxes I've worked through, [Antique](/writeups/hackthebox/linux/easy/antique/) with its JetDirect service and [Backdoor](/writeups/hackthebox/linux/easy/backdoor/) with gdbserver, since they all reward the same instinct: don't assume an unfamiliar port is a dead end, go fingerprint it properly. It also belongs with the SQLi-via-sqlmap boxes, [Cat](/writeups/hackthebox/linux/medium/cat/), [Monitored](/writeups/hackthebox/linux/medium/monitored/), and [Usage](/writeups/hackthebox/linux/easy/usage/), and with the recurring "localhost-only service, tunnel it and pop it" pattern I've seen on [MonitorsTwo](/writeups/hackthebox/linux/easy/monitorstwo/), [Nocturnal](/writeups/hackthebox/linux/easy/nocturnal/), and [Monitored](/writeups/hackthebox/linux/medium/monitored/) as well.
 
 ---
 
@@ -67,9 +67,9 @@ PORT      STATE SERVICE VERSION
 50051/tcp open  unknown
 ```
 
-nmap cannot fingerprint 50051 and dumps a binary probe response. The `\0\0\x18\x04` framing is **HTTP/2**, which is the giveaway that this is gRPC.
+Right away I noticed nmap couldn't fingerprint port 50051 and just dumped a binary probe response instead of a clean service banner. Rather than shrug it off, I looked closely at the raw bytes, and the `\0\0\x18\x04` framing jumped out as **HTTP/2**, which was the detail that told me this was almost certainly gRPC rather than some custom TCP protocol.
 
-after doing some research I found that this is running some sort of `gRPC` on port `50051`. This GitHub repo lets us interact with the gRPC server: <https://github.com/fullstorydev/grpcurl>.
+After a bit of research to confirm that hunch, I settled on `grpcurl` as my entry point for interacting with the service: <https://github.com/fullstorydev/grpcurl>.
 
 ```bash
 grpcurl -plaintext pc.htb:50051 list
@@ -84,11 +84,11 @@ grpc.reflection.v1alpha.ServerReflection
 
 **gRPC server reflection**
 
-gRPC uses Protocol Buffers, so without the `.proto` file a client does not know what methods or message shapes exist. **Server reflection** is an optional service that lets the server hand that schema out at runtime. When it is enabled (it is, here, note `ServerReflection` in the list) tools like `grpcurl` and `grpcui` can enumerate every service, method, and field with no prior knowledge. `grpcurl -plaintext pc.htb:50051 describe SimpleApp` prints the full definition. Reflection should be disabled on anything internet facing.
+gRPC is built on Protocol Buffers, which means that without the corresponding `.proto` file a client has no way of knowing what methods or message shapes even exist on the server side. That's where **server reflection** comes in: it's an optional service that lets the server hand its own schema out at runtime, on request. Seeing `ServerReflection` in the `list` output told me it was enabled here, and that's exactly what let tools like `grpcurl` and `grpcui` enumerate every service, method, and field without me having any prior knowledge of the API. Running `grpcurl -plaintext pc.htb:50051 describe SimpleApp` printed the full definition for me. From a defensive standpoint, reflection is something I'd always recommend disabling on anything internet-facing, since it's essentially handing an attacker your API documentation for free.
 
 </div>
 
-with `grpcui` we get a clickable interface: <https://github.com/fullstorydev/grpcui>.
+To move faster than raw `grpcurl` calls would let me, I brought up `grpcui` for a clickable interface: <https://github.com/fullstorydev/grpcui>.
 
 ```bash
 grpcui -plaintext pc.htb:50051

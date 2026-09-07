@@ -52,9 +52,9 @@ tags:
 
 ## Overview
 
-Inject teaches **using an LFI to fingerprint the stack before you attack it**. The image-viewer traversal is not itself a shell, but reading the Maven `pom.xml` tells you it's Spring Cloud Function 3.2.5. And *that* is the RCE. The rest is loot chaining (Maven `settings.xml` holds a plaintext password) and a **writable-directory cron**: you can't edit the existing playbook, but you can drop a *new* one that root's cron will happily run. Good practice for "what am I actually running" enumeration and for Ansible as an attack surface.
+What I liked most about Inject was how it forced me to treat a file-read bug as a reconnaissance tool rather than an end in itself. The image-viewer traversal doesn't hand you a shell on its own, but I quickly realized its real value: pointing it at the application's build metadata told me exactly what framework and version I was dealing with, Spring Cloud Function 3.2.5, and that version number was the whole game. Once I had it, the RCE practically named itself. From there the box turns into a loot-chaining exercise (a Maven `settings.xml` sitting around with a plaintext password) capped off by a **writable automation directory** privilege escalation: I couldn't touch the existing Ansible playbook root was already running, but nothing stopped me from dropping a brand-new one into the same directory and letting root's cron execute it for me. It's a solid reminder to always ask "what is this app actually running underneath me" before jumping straight to exploit-searching, and a good example of Ansible automation itself becoming an attack surface.
 
-Related LFI/traversal boxes: [Backdoor](/writeups/hackthebox/linux/easy/backdoor/), [Titanic](/writeups/hackthebox/linux/easy/titanic/), [Bagel](/writeups/hackthebox/linux/medium/bagel/). Related "read build metadata to find the CVE": [Pilgrimage](/writeups/hackthebox/linux/easy/pilgrimage/) (`.git` + binary), [Heal](/writeups/hackthebox/linux/medium/heal/). Related writable-cron / task-dir privesc: [Previse](/writeups/hackthebox/linux/easy/previse/), [mkingdom](/writeups/tryhackme/linux/easy/mkingdom/), [Jupiter](/writeups/hackthebox/linux/medium/jupiter/).
+I've hit this same "read config to fingerprint before exploiting" pattern on several other boxes, so it's worth linking them together: for LFI and path traversal specifically, see [Backdoor](/writeups/hackthebox/linux/easy/backdoor/), [Titanic](/writeups/hackthebox/linux/easy/titanic/), and [Bagel](/writeups/hackthebox/linux/medium/bagel/); for using leaked build metadata to pin down the exact CVE, [Pilgrimage](/writeups/hackthebox/linux/easy/pilgrimage/) (via a `.git` directory and a binary) and [Heal](/writeups/hackthebox/linux/medium/heal/) both follow the same logic; and for writable cron/task directories as a root path, I ran the same playbook (pun intended) on [Previse](/writeups/hackthebox/linux/easy/previse/), [mkingdom](/writeups/tryhackme/linux/easy/mkingdom/), and [Jupiter](/writeups/hackthebox/linux/medium/jupiter/).
 
 ---
 
@@ -62,11 +62,11 @@ Related LFI/traversal boxes: [Backdoor](/writeups/hackthebox/linux/easy/backdoor
 
 ![Pasted image 20240215184743](Pasted-image-20240215184743.png)
 
-on the uploads page we can only upload images.
+The upload page only accepts image files, which told me the interesting attack surface was probably in how those images get served back rather than in the upload validation itself.
 
 ![Pasted image 20240215191838](Pasted-image-20240215191838.png)
 
-we uploaded a regular image then tried to do some LFI
+I uploaded a normal image first just to see how the application handled a legitimate file and to get a feel for the `show_image` endpoint's parameters. Once I saw it took a filename directly, testing for path traversal was the obvious next step.
 
 ```bash
 curl -vv 'http://inject.htb:8080/show_image?img=../../../../../../../../../../../../../../etc/passwd'
@@ -83,17 +83,17 @@ phil:x:1001:1001::/home/phil:/bin/bash
 
 **Turn the LFI into stack recon**
 
-Before hunting an RCE, use the file read to learn *what the app is*. For a Java web app the key files are `pom.xml` / `build.gradle` (dependency versions), `application.properties` / `application.yml` (creds, internal hosts), and the source tree under `/var/www/WEB-INF` or the project dir. Reading `../webapp/pom.xml` here shows `spring-cloud-function-web` **3.2.5**. The exact vulnerable version. Also try `/proc/self/environ`, `/proc/self/cwd/…`.
+My approach with any arbitrary file read like this is to resist the urge to immediately hunt for a shell and instead use it to learn exactly *what the app is* first. For a Java web application, that means going after the files that reveal dependency versions and configuration: `pom.xml` or `build.gradle` for the former, `application.properties` or `application.yml` for the latter (which often also leak internal hostnames or credentials), and the source tree under something like `/var/www/WEB-INF` or the project's own directory. I applied that here and read `../webapp/pom.xml`, which showed `spring-cloud-function-web` at version **3.2.5**, the exact vulnerable release. When the standard files don't pan out, `/proc/self/environ` and `/proc/self/cwd/…` are worth trying too, since they can leak the running process's environment and working directory.
 
 </div>
 
-We know the service is running Spring, so we researched **CVE-2022-22963** and got a shell. (Found via the LFI: an XML file in the `webapp` directory shows it's running the Spring framework.)
+With the version pinned down through that XML file in the `webapp` directory, I knew exactly which advisory to go looking for. Spring Cloud Function 3.2.5 pointed straight at **CVE-2022-22963**, and researching that CVE gave me everything I needed to turn the finding into a working shell.
 
 <div class="callout callout-note">
 
 **CVE-2022-22963, Spring Cloud Function SpEL RCE**
 
-Spring Cloud Function ≤ 3.2.2 evaluates the `spring.cloud.function.routing-expression` request header as a **SpEL** expression when the `functionRouter` is used. `T(java.lang.Runtime).getRuntime().exec(...)` in that header runs as the app user. Unauthenticated, single request. (Not to be confused with Spring4Shell / CVE-2022-22965, which dropped the same week.)
+The root cause here is that Spring Cloud Function versions up to and including 3.2.2 will evaluate the `spring.cloud.function.routing-expression` request header as a **SpEL** expression whenever the `functionRouter` is in use, rather than treating it as inert routing metadata. That means anything I put in that header gets executed as code by the Spring expression engine. Sending `T(java.lang.Runtime).getRuntime().exec(...)` inside the header runs as the application user, and the whole thing takes a single unauthenticated request, no session, no prior foothold needed. It's worth being careful not to confuse this with Spring4Shell (CVE-2022-22965), which broke the same week and gets mixed up with this one constantly.
 
 </div>
 

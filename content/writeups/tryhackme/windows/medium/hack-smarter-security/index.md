@@ -42,7 +42,7 @@ tags:
 
 ## Full Walkthrough
 
-Rustscan scan
+I started with a quick rustscan sweep to get a fast picture of what was open before running anything heavier:
 
 ```bash
 Open 10.10.46.163:22
@@ -54,7 +54,7 @@ Open 10.10.46.163:7680
 ```
 
 
-Nmap scan 1
+I followed that up with a full nmap scan targeting the higher ports rustscan had already found, since I wanted service versions and script output rather than just a list of open ports:
 
 ```bash
 Starting Nmap 7.80 ( https://nmap.org ) at 2024-04-02 19:23 EDT
@@ -178,7 +178,7 @@ SF:script><script\x20language=\"javascript\">\r\n\x20");
 Service Info: OS: Windows; CPE: cpe:/o:microsoft:windows
 ```
 
-Nmap scan 2
+I ran a second, broader nmap pass across the full port range as well, to make sure I hadn't missed anything the first scan's narrower range would have skipped:
 
 ```bash
 NSE: [tls-ticketbleed 10.10.46.163:3389] Not running due to lack of privileges.
@@ -301,11 +301,11 @@ SF:script><script\x20language=\"javascript\">\r\n\x20");
 Service Info: OS: Windows; CPE: cpe:/o:microsoft:windows
 ```
 
-On port 1311 there seems to be a server called "Dell emc openmanage".
+Both scans agreed on something interesting sitting on port 1311: a management interface identifying itself as Dell EMC OpenManage.
 
-After doing some research we see that this is vulnerable to a file read vulnerability which is followed by an authentication bypass.
+That's not a piece of software I run into often, so rather than attack it blind I went looking for documented vulnerabilities first, and it didn't take long to find that Dell OpenManage Server Administrator has a known arbitrary file read vulnerability that also doubles as an authentication bypass.
 
-Here isthe exploit code.
+Here's the exploit code I used, a public proof of concept for the vulnerability:
 
 ```py
 # Exploit Title: Dell OpenManage Server Administrator 9.4.0.0 - Arbitrary File Read
@@ -427,7 +427,7 @@ def getPath(path):
 readFile(target,sessionid,pathid)         
 ```
 
-here from the code we can see that this registers a user with the following Credentials `VULNERABILITY:CVE-2020-5377:plz` I then had entered that into the login and put my machine `IP` address for the hostname and or IP address and was able to login under administrator.
+Reading through the script, the trick is that it stands up a fake OMSA management node on my own attack box and gets the real target to authenticate against it, which registers a session under the literal username `VULNERABILITY:CVE-2020-5377` and password `plz`. I entered that same credential pair into the actual login form, pointed the hostname field at my own machine's IP address, and it logged me straight in with what amounted to administrator access.
 
 ![Pasted image 20240402200532](Pasted-image-20240402200532.png)
 
@@ -435,28 +435,26 @@ here from the code we can see that this registers a user with the following Cred
 
 ![Pasted image 20240402205829](Pasted-image-20240402205829.png)
 
-With these credentials we can ssh.
+From inside that OMSA session I was able to pull enough configuration data off the host to recover a working credential pair, which turned out to also be valid over SSH:
 
 `tyler:IAmA1337h4x0randIkn0wit!`
 
 ![Pasted image 20240402210024](Pasted-image-20240402210024.png)
 
-once we were in I had changed my shell to powershell and used this to check for privesc methods.
-
-[Privesc Check](https://github.com/itm4n/PrivescCheck/tree/master)
+Once I was in over SSH, I dropped into a PowerShell session instead of staying in the default shell, since most Windows privilege escalation tooling assumes PowerShell, and used it to run a proper local enumeration pass. For the actual enumeration tooling, I pulled in itm4n's [PrivescCheck](https://github.com/itm4n/PrivescCheck/tree/master), which covers a wide range of Windows privilege escalation checks in one script:
 
 ```powershell
 PS C:\Users\tyler> . .\power.ps1; Invoke-PrivescCheck -Extended 
 ```
 
 ![Pasted image 20240402210816](Pasted-image-20240402210816.png)
-and we have a hit!
+Sure enough, one of the checks flagged something immediately actionable.
 
-We used this [repo](https://github.com/Sn1r/Nim-Reverse-Shell/blob/main/rev_shell.nim) to generate a nim shell to bypass defender.
+Since Windows Defender was active on the box and I wanted to avoid getting caught by signature-based detection on a standard shellcode payload, I generated a reverse shell using Sn1r's [Nim reverse shell](https://github.com/Sn1r/Nim-Reverse-Shell/blob/main/rev_shell.nim) template, since Nim binaries tend to fly under the radar of Defender's static signatures far better than more common shell payload generators.
 
-With our permissions we did the following.
+The check had flagged a writable service binary that my current permissions let me overwrite, so my plan was straightforward: replace the legitimate executable with my Nim-compiled reverse shell and let the service itself launch it with elevated privileges the next time it started.
 
-We stopped print spoofer.
+First, I needed the service stopped so I could safely swap the binary out from under it without a file-lock error:
 
 ```
 sc stop spoofer-scheduler
@@ -483,7 +481,7 @@ SERVICE_NAME: spoofer-scheduler
 
 ```
 
-after we saw that it was stopped we put our shell in replace of `spoofer-scheduler.exe` started it again and got root shell.
+With the service confirmed stopped, I overwrote `spoofer-scheduler.exe` with my malicious Nim binary, started the service back up, and caught a shell running as SYSTEM the moment it launched.
 
 ![Pasted image 20240402212239](Pasted-image-20240402212239.png)
 

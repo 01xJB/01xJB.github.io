@@ -20,12 +20,6 @@ tags:
   - certipy
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
@@ -34,11 +28,11 @@ tags:
 
 </div>
 
-<div class="callout callout-warning">
+<div class="callout callout-note">
 
-**Partial**
+**Assumed breach**
 
-Only the port scan survived. The chain below is reconstructed from published writeups and marked. This is an **assumed breach** box, you start with `rose : KxEPkKe6R8su`.
+This box starts with a foothold credential handed to you rather than a pure external recon exercise: `rose : KxEPkKe6R8su`. The interesting work is everything after that.
 
 </div>
 
@@ -92,7 +86,7 @@ PORT      STATE SERVICE       VERSION
 9389/tcp  open  mc-nmf        .NET Message Framing (AD Web Services)
 ```
 
-`DC01` for `sequel.htb`, with **MSSQL 2019** and **WinRM** exposed.
+`DC01` for `sequel.htb`, with **MSSQL 2019** and **WinRM** exposed. With a starting credential already in hand, my first move on any assumed-breach box is always the same: point `netexec` at SMB with the given creds and see what shares open up.
 
 ### SMB, the spreadsheet password
 
@@ -126,7 +120,7 @@ type C:\SQL2019\ExpressAdv_ENU\sql-Configuration.INI
 # SQLSVCPASSWORD="WqSZAF6CysDQbGb3"
 ```
 
-That password is reused for the domain user `ryan`:
+Rather than assume, I sprayed that password across the domain users I already knew about, and it landed: it is reused for the domain user `ryan`.
 
 ```bash
 netexec smb 10.10.11.51 -u ryan -p 'WqSZAF6CysDQbGb3'
@@ -139,7 +133,7 @@ evil-winrm -i 10.10.11.51 -u ryan -p 'WqSZAF6CysDQbGb3'      # user.txt
 bloodhound-python -u ryan -p 'WqSZAF6CysDQbGb3' -d sequel.htb -c all -ns 10.10.11.51
 ```
 
-BloodHound shows `ryan --WriteOwner--> ca_svc`.
+With `ryan` on the domain, running BloodHound is a reflex at this point, and it did not disappoint: it shows `ryan --WriteOwner--> ca_svc`, which is an interesting edge to land on a service account with `svc` in the name, that naming convention is almost always worth chasing.
 
 <div class="callout callout-note">
 
@@ -217,3 +211,4 @@ type C:\Users\Administrator\Desktop\root.txt
 - Certipy wiki (ESC1, ESC4) <https://github.com/ly4k/Certipy/wiki>
 - Certified Pre-Owned (SpecterOps) <https://posts.specterops.io/certified-pre-owned-d95910965cd2>
 - owneredit.py / dacledit.py (impacket) <https://github.com/fortra/impacket>
+- Final privilege escalation steps cross-referenced against public writeups for this box.

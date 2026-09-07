@@ -15,7 +15,7 @@ tags:
 
 </div>
 
-This writeup exists as an exported HTML/PDF bundle (from CherryTree) rather than markdown.
+I originally wrote this one up in CherryTree rather than markdown, so instead of a native page here, this entry points to the exported bundle. The full narrative, screenshots included, lives in the files below.
 
 - PDF: **Devzat/(medium) Devzat HTB Writeup.pdf**
 - HTML: `HTB/Linux/Medium/Devzat/HTB_Writeups--Devzat_(Medium).html`

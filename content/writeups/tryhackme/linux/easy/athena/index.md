@@ -92,7 +92,7 @@ Host script results:
 ```
 
 
-I found that smb was running and decided to try to access it I found a public share called `public` and found the following txt file within the share and the contents are below.
+With SMB showing up in the scan, I went straight for it rather than starting on the web port, since an exposed SMB service is often the fastest route to information a box's own admins never meant to leave lying around. Connecting anonymously, I found a share called `public` sitting wide open, and inside it was a text file whose contents turned out to be exactly the kind of internal note that gives an attacker a head start.
 
 ```
 Dear Administrator,
@@ -105,7 +105,7 @@ Athena
 Intern
 ```
 
-after doing to that part of the website I found a input field which allowed you to enter an IP address in to ping an iP I tried command injection by null character `%0a` and was able to execute commands but the `ping.php` has some measures in place to block characters to prevent shells from being executed
+Following that lead to `/myrouterpanel`, I found an input field that let me enter an IP address for the application to ping. Fields like this are practically an invitation to test for OS command injection, since they're almost always shelling out to a system ping binary behind the scenes. My first attempts with the usual separators didn't get anywhere, so I tried a newline character (`%0a`) instead, and that got me command execution. Looking at the underlying `ping.php` afterward confirmed why my first attempts failed: the application had a filter in place specifically to block the more obvious shell metacharacters.
 
 ```php
 <?php
@@ -147,7 +147,7 @@ function containsMaliciousCharacters($input) {
 </pre>
 ```
 
-so what I did was make the python program below to get a webshell then afterwards download a python reverse shell into the `/tmp `directory then executed it to get a netcat shell from there I then executed a propper shell to get a pwncat shell
+Looking at the filter's logic, it was only checking for `;`, `&`, and `|`, three of the most common command separators, but it never accounted for a newline. Since `shell_exec()` happily runs multiple lines as sequential commands, appending `%0a` followed by my own command let me slip straight past the blocklist. Rather than fight with a raw, unstable shell over HTTP, my plan was to use that injection to stage a proper reverse shell: I wrote the Python script below to reach back to my listener, uploaded it into `/tmp`, executed it to get an initial connection, and once I had that foothold, upgraded it into a full interactive shell through `pwncat`.
 
 ```python
 import socket
@@ -194,16 +194,18 @@ index.html  ping.php  style.css  under-construction.html
 (remote) www-data@routerpanel:/var/www/html/myrouterpanel$ 
 ```
 
-the user can run `root) NOPASSWD: /usr/sbin/insmod /mnt/.../secret/venom.ko`
+From `www-data` I moved laterally to the `athena` account, and once I was there, checking my sudo rights turned up something unusual: `athena` could run `insmod` as root against a specific kernel module, `NOPASSWD: /usr/sbin/insmod /mnt/.../secret/venom.ko`. A custom `.ko` file sitting in a hidden `secret` directory that root has explicitly authorized a low-privilege user to load is about as strong a signal as you can get that the module itself is the intended path to root, so I pulled a copy down to analyze rather than just loading it blind.
 
-I downloaded that and put it into `ghidra` and found interesting functions which hide the proc
+Loading it into Ghidra, I started working through the module's functions to understand what it actually did once inserted into the kernel. The first thing that stood out was a function built to hide a process, the kind of behavior you'd expect from a rootkit designed to conceal itself from normal process listings:
 
 ![Pasted image 20250505115839](Pasted-image-20250505115839.png)
 
-and another function which if killed gives root
+Digging further, I found a second function that reacted to a specific signal by escalating the privileges of whatever process sent it, meaning the right `kill` call to the right signal number would hand me root outright:
 
 ![Pasted image 20250505115857](Pasted-image-20250505115857.png)
 
+
+With the module's behavior mapped out in Ghidra, I confirmed the sudo rule and then put my analysis to the test directly against the running system.
 
 ```bash
 (remote) athena@routerpanel:/home/athena$ sudo -l

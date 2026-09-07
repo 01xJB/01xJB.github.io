@@ -20,7 +20,7 @@ tags:
 
 **This is tooling, not a box writeup**
 
-Notes for an LKM rootkit used to hold a KotH box. Based on [h0mbre's "Learn C By Creating A Rootkit"](https://h0mbre.github.io/Learn-C-By-Creating-A-Rootkit/).
+These are my working notes for an LKM rootkit I built and used to hold a King of the Hill box. I based the core kernel-module technique on [h0mbre's "Learn C By Creating A Rootkit"](https://h0mbre.github.io/Learn-C-By-Creating-A-Rootkit/) and adapted the trigger and hiding logic for KotH play, where the goal isn't stealth against a defender's EDR but persistence and a fast, low-noise way to reclaim a shell if I get knocked off the box mid-round.
 
 </div>
 
@@ -34,11 +34,13 @@ Game-breaking. It **can and will break the machine** if not compiled with the GC
 
 ## Install
 
+Before running anything, I always set the callback IP and port inside the script itself, since I only get one clean compile per target and don't want to be editing it under pressure mid-round:
+
 ```bash
 bash make.sh
 ```
 
-You may need to change `/lib/` to something like `/lib/x86_64-linux-gnu/` depending on the distribution. Remember to set the callback IP/port in the script first.
+On some distributions the build script's hardcoded `/lib/` path doesn't match where the kernel actually expects its modules, so I've had to change it to something like `/lib/x86_64-linux-gnu/` before the install would go through cleanly. Worth checking that path first if the build fails.
 
 ## Usage
 
@@ -50,6 +52,8 @@ You may need to change `/lib/` to something like `/lib/x86_64-linux-gnu/` depend
 |, | `ioctl` and `ps` are disabled automatically |
 
 ## Remove
+
+Once I no longer need persistence, or before handing a box back, I pull the module out with the matching removal script:
 
 ```bash
 bash remove.sh

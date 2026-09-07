@@ -21,7 +21,7 @@ tags:
 
 **Tooling, not a box writeup**
 
-Notes for an `LD_PRELOAD` userland rootkit used to hold KotH boxes.
+These are my working notes for kingkit, an `LD_PRELOAD` userland rootkit I put together specifically for holding King of the Hill boxes on TryHackMe. This is not a traditional walkthrough with a foothold and a flag, it is a reference for a tool I built and reach for whenever I need to defend a compromised host against other players trying to take it back. I am writing down the build steps, the feature set, and the removal procedure here because I use this often enough that I would rather have it documented than reconstruct it from memory every round.
 
 </div>
 
@@ -35,9 +35,13 @@ Because of conflicting glibc versions you must compile on a KotH machine. Easies
 
 ## Build & install
 
+Compiling it is straightforward once I have set the header macros for the target round. I build it as a shared object so it can be loaded through `LD_PRELOAD`, and I link against `libdl` since the rootkit resolves the real libc symbols at runtime through `dlsym` before hooking them:
+
 ```bash
 gcc kingkit.c -shared -fPIC -ldl -o kingkit.so
 ```
+
+Installing it is then just a matter of dropping the compiled library somewhere persistent and telling the dynamic linker to preload it into every process that starts from that point on:
 
 ```bash
 cp ./kingkit.so /lib/kingkit.so
@@ -67,7 +71,7 @@ echo "/lib/kingkit.so" > /etc/ld.so.preload
 
 ## Removing an LD_PRELOAD rootkit
 
-Static binaries are unaffected by `LD_PRELOAD`, so:
+The one weakness I always keep in my back pocket for cleanup is that statically linked binaries never go through the dynamic linker's preload mechanism, so a static binary runs unaffected by `LD_PRELOAD` no matter how many libc calls the rootkit has hooked. That is exactly how I remove it once I am done with a round:
 
 ```bash
 chmod +x remove && ./remove          # ships a static binary that clears /etc/ld.so.preload

@@ -50,7 +50,7 @@ PORT      STATE    SERVICE REASON      VERSION
 54045/tcp filtered unknown no-response
 ```
 
-I used burp to find some content and I found an interesting request.
+I ran Burp in the background while browsing the site normally, more to build a map of requests than to hunt for anything specific yet, and one exchange in the history caught my eye enough to dig into further.
 
 ```bash
 GET /?Name=EUjaEgcH&Email=gkNmGzJJ%40burpcollaborator.net&Email=ZrQHwWgt%40burpcollaborator.net&Message=987754 HTTP/1.1
@@ -65,7 +65,7 @@ Connection: close
 Cache-Control: max-age=0
 ```
 
-and this is the response.
+The corresponding response came back as the full page render:
 
 ```bash
 HTTP/1.1 200 OK
@@ -507,7 +507,7 @@ Ratings given by me
 </html>
 ```
 
-From the way this includes `<button onclick="sendRequest('1')">Game 1</button>` almost makes it seem like there is `XSS` so I take a look and crawl it a bit more.
+The way the page wires `<button onclick="sendRequest('1')">Game 1</button>` straight into inline JavaScript made me suspect that input handling elsewhere on the site might be just as loose, so I wanted to crawl it a bit further and test specifically for `XSS`.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/XSStrike] - [Fri Apr 12, 21:31]
@@ -546,10 +546,9 @@ From the way this includes `<button onclick="sendRequest('1')">Game 1</button>` 
  !] Progress: 2/2.html  
 ```
 
-I find a few things which can possibly help me in this situation. It seems that there is some technologies and `js` libs that are used here that are used on other technologies and `CMS` such as `drupal` and etc. From here I am going to use `nuclei` to identify them more indepth as well as some other things within this web application.
+That run surfaced a few useful leads. The JavaScript libraries in play here are the same ones that turn up on other CMS platforms like Drupal, which told me I was likely dealing with a fairly generic, template-based front end rather than something custom-built, and that the real application logic was probably sitting a layer deeper. My next move was pointing `nuclei` at the target to get a broader technology fingerprint and flag anything else worth chasing.
 
-I was able to find a subdomain by the email that was on the website `incognito.com`
-I then used `ffuf` to find the subdomain `dev`.
+Digging through the page content also turned up a contact email address referencing `incognito.com`, a domain that hadn't shown up anywhere else in my recon yet, so I ran `ffuf` against it to enumerate subdomains and turned up `dev`.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/GameBuzz] - [Fri Apr 12, 22:12]
@@ -616,7 +615,7 @@ by Ben "epi" Risher 🤓                 ver: 2.10.0
 [>-------------------] - 3m     30209/3749282 200/s   http://dev.incognito.com/secret/upload
 ```
 
-After fuzzing with `feroxbuster` I was able to find the endpoint `http://dev.incognito.com/secret/upload/`. Which allows us to upload files. What my assumtion is that looking at the following requests we can upload a `.pkl` file which is a **Python pickle file serializes a tuple of two numpy arrays**. So we can possible generate a payload with `pickle` to get a shell like here.
+Fuzzing that path with `feroxbuster` surfaced an upload endpoint at `http://dev.incognito.com/secret/upload/`. Looking at the requests the application itself was already making, it became clear the intended workflow revolved around uploading a `.pkl` file, a **Python pickle serializing a tuple of two numpy arrays**, presumably some kind of model artifact behind the game ratings feature. Pickle deserialization is a technique I always keep in the back of my mind for exactly this kind of upload, since Python's `pickle` module will happily execute arbitrary code during unpickling if an attacker controls the file. So my plan was to build a malicious `.pkl` of my own and see whether the server would deserialize it the same way.
 
 ```bash
 POST /fetch HTTP/1.1
@@ -648,7 +647,7 @@ Content-Length: 51
 {"Game": "Valorant", "Rating": 7, "Review": "Okay"}
 ```
 
-I then used this [resource](https://frichetten.com/blog/escalating-deserialization-attacks-python/) to help generate the payload.
+Rather than hand-roll the `__reduce__` payload from scratch, I referenced [this writeup on escalating Python deserialization attacks](https://frichetten.com/blog/escalating-deserialization-attacks-python/) to make sure I had the technique right.
 
 ```python
 #!/usr/bin/env python3
@@ -662,7 +661,7 @@ class SerializedPickle(object):
 pickle.dump(SerializedPickle(), open('baphomet','wb'))
 ```
 
-I was able to generate this payload then afterwards upload and call it using the same method it was calling the other `.pkl` files.
+With the malicious pickle generated, I uploaded it the same way the legitimate `.pkl` files were being uploaded, then called it back through the same `/fetch` endpoint that had originally handed me the ratings JSON, expecting the server to deserialize it and run my embedded command in the process.
 
 ```bash
 POST /fetch HTTP/1.1
@@ -692,7 +691,7 @@ bash: no job control in this shell
 www-data@incognito:/$ 
 ```
 
-Used the pwnkit exploit to privesc
+For privilege escalation, the polkit version on this box matched **PwnKit (CVE-2021-4034)**, the local privilege escalation flaw in `pkexec` that had been making the rounds not long before this box was built, so I pulled the exploit onto the target through my existing shell and ran it.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~] - [Fri Apr 12, 23:46]

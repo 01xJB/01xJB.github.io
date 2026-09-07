@@ -49,7 +49,7 @@ tags:
 <!-- nmap scan -->
 PORT   STATE SERVICE REASON  VERSION
 22/tcp open  ssh     syn-ack OpenSSH 8.2p1 Ubuntu 4ubuntu0.2 (Ubuntu Linux; protocol 2.0)
-| vulners: [output trimmed — CVE reference dump]
+| vulners: [output trimmed - CVE reference dump]
 80/tcp open  http    syn-ack Apache httpd 2.4.41 ((Ubuntu))
 | http-fileupload-exploiter: 
 |   
@@ -61,7 +61,7 @@ PORT   STATE SERVICE REASON  VERSION
 |   
 |_    Couldn't find a file-type field.
 |_http-server-header: Apache/2.4.41 (Ubuntu)
-| vulners: [output trimmed — CVE reference dump]
+| vulners: [output trimmed - CVE reference dump]
 |_http-dombased-xss: Couldn't find any DOM based XSS.
 | http-csrf: 
 | Spidering limited to: maxdepth=3; maxpagecount=20; withinhost=10.10.200.9
@@ -110,7 +110,7 @@ Target: http://10.10.200.9/
 http://road.thm/phpMyAdmin/ChangeLog
 
 
-in the dir /v2/admin/register.html we were able to register a admin account and then login
+Inside `/v2/admin/register.html` I found that the registration form never checked whether the account being created should carry admin privileges at all. I was able to register a brand-new admin account outright and log straight in with it, no invite code, no approval step, nothing gating it.
 
 http://road.thm/v2/index.php
 
@@ -159,10 +159,10 @@ Submit
 <!-- admin pwned -->
 
 
-i saw that when i were to reset my password it would have me email there changed that to the admin password now BOOM admin ;3
+Once inside as this self-registered admin, I noticed the password-reset flow trusted whatever email address I put into a hidden `uname` field rather than tying the reset to my own authenticated session. That meant I could submit the real administrator's address, `admin@sky.thm`, in that field and reset *their* password instead of my own: a textbook broken-access-control bug hiding inside a password-reset form.
 
 
-we can now visit the website "http://road.thm/phpMyAdmin/" but we need to login
+With the real administrator's password now mine, I tried it against phpMyAdmin at `http://road.thm/phpMyAdmin/`, hoping the same login would carry over to the database console.
 
 <!-- error message -->
  mysqli::real_connect(): (HY000/1045): Access denied for user 'admin@sky.thm'@'localhost' (using password: YES)
@@ -243,7 +243,7 @@ $(function() {
   <!-- response -->
 
 
-  when uploading and captureing the response for the upload image thing i uploaded a php reverse shell then found where it was stored ;3
+  The admin panel's profile-image upload feature was next. I intercepted the request in Burp and checked the response carefully, since nothing on the server side appeared to validate that the uploaded file was actually an image, so I swapped in a PHP reverse shell instead and used the response to work out exactly where the application had stored it on disk.
 
   /v2/profileimages/
 
@@ -344,7 +344,7 @@ processManagement:
 #snmp:
 
 
-we found nothing in mysql lets try here
+MySQL turned up nothing beyond confirming the schema, so I turned my attention to the other database service I'd seen running locally on the box: MongoDB.
 
 > listCollections
 uncaught exception: ReferenceError: listCollections is not defined :
@@ -388,9 +388,9 @@ shellHelper@src/mongo/shell/utils.js:819:15
 { "_id" : ObjectId("60ae26d2203d21857b184a7a"), "Name" : "Rohit", "Salary" : "30000" }
 
 
-we found on linpeas that the pkexec was sus so lets try it
+linpeas flagged something worth investigating about the `pkexec` binary on this box, which was reason enough to dig into it directly.
 
-so what we did was find out pid
+The first step was finding the PID of the terminal session I intended to authenticate from, since `pkttyagent` needs to be pointed at a specific process:
 
 echo $$
 
@@ -403,7 +403,7 @@ webdeveloper@sky:/var/backups$ pkttyagent -p 85065
 ```
 
 
-that pid was the pid of another terminal i was logged into the user webdeveloper then i did 
+That PID belonged to a second terminal where I was already logged in as `webdeveloper`, so from that same session I ran: 
 
 ```console
 webdeveloper@sky:~$ pkexec /bin/bash
@@ -411,4 +411,4 @@ root@sky:~#
 ```
 
 
-entered the password on the other session then BOOM ROOT PWNED ;3
+I entered the `webdeveloper` password into the polkit authentication prompt that appeared on that second session, and the pending `pkexec` call on my original shell dropped straight into a root prompt.

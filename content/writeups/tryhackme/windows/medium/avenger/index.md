@@ -48,7 +48,7 @@ tags:
 
 ## Full Walkthrough
 
-I used `ffuf` to find directories on the webapplication and found an interesting directory that lead to a wordpress page.
+I started with a directory brute-force against the web application using `ffuf`, mostly to get a sense of what was actually hosted before touching anything else, and one result immediately stood out: a directory that led into a WordPress installation.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/avenger] - [Sat Apr 13, 23:37]
@@ -99,9 +99,9 @@ xampp                   [Status: 301, Size: 337, Words: 22, Lines: 10]
 [WARN] Caught keyboard interrupt (Ctrl-C)
 ```
 
-There was a search bar on the page I attempted to search something and it have me another domain for this machine `avenger.tryhackme`
+The page also had a search bar, and out of habit I tried searching for something arbitrary just to see how the application handled it. The response leaked a second domain for this machine, `avenger.tryhackme`, which hadn't shown up in my scanning yet.
 
-I then used `wpscan` to enumerate the now webapplication.
+With a proper WordPress vhost in hand, I ran `wpscan` against it next to enumerate the plugin and theme landscape rather than guessing at what might be outdated.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/avenger] - [Sat Apr 13, 23:52]
@@ -224,7 +224,7 @@ Interesting Finding(s):
 [+] Elapsed time: 00:00:05
 ```
 
-We have information such as plugins that are installed. Looking at the results I saw that there were some vulnerabilities regarding `forminator`. This allows an attacker to be able to upload files of pretty much any type to the server and have it be executed by the server. Since we are dealing with a windows machine we can create a `bat` file that downloads and executes a powershell script to get a reverse shell.
+That scan gave me a full picture of what was installed, and one result jumped out right away: the **Forminator** plugin, sitting well behind its latest release at version 1.24.1. Checking that version against known Forminator vulnerabilities confirmed it was affected by an unrestricted file upload bug, meaning I could upload essentially any file type and have the server execute it on request. Since this was a Windows target running Apache under XAMPP, my plan was to drop a `.bat` file that would pull down and execute a PowerShell reverse shell rather than fight with a payload format this stack might not run the way I wanted.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/avenger] - [Sun Apr 14, 17:40]
@@ -253,7 +253,7 @@ Serving HTTP on 0.0.0.0 port 8000 (http://0.0.0.0:8000/) ...
 10.10.147.186 - - [14/Apr/2024 17:45:45] "GET /payload.ps1 HTTP/1.1" 404 -
 ```
 
-Not long after it ends up executing then we get a shell!.
+Sure enough, not long after uploading the bat file, the target reached out and fetched my PowerShell stager, and the listener I already had waiting caught the resulting shell:
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/avenger] - [Sun Apr 14, 17:40]
@@ -266,9 +266,9 @@ Microsoft Windows [Version 10.0.17763.4499]
 C:\Windows\system32>
 ```
 
-Here we have information regarding this vulnerability on [EploitDB](https://www.exploit-db.com/exploits/51664) and here as well on [GitHub](https://github.com/E1A/CVE-2023-4596/blob/main/exploit.py)
+For anyone wanting the deeper technical breakdown of this bug, there's good detail on [ExploitDB](https://www.exploit-db.com/exploits/51664) and in the [public PoC on GitHub](https://github.com/E1A/CVE-2023-4596/blob/main/exploit.py) for CVE-2023-4596.
 
-After getting the user flag it is a bit hard to enumerate automatically the system since we have AV enabled. I manually checked a bunch of services and decided to check `Apache` that is running on this windows machine.
+With the user flag grabbed, privilege escalation turned out to be more manual than usual, since AV on the box got in the way of running the automated enumeration scripts I'd normally lean on. So I worked through the running services by hand instead, and `Apache` stood out as worth a closer look given this was a Windows box hosting it.
 
 ```bash
 C:\Users\hugo\Desktop>sc qc Apache2.4
@@ -290,9 +290,10 @@ SERVICE_NAME: Apache2.4
 C:\Users\hugo\Desktop>
 ```
 
-I see that this is running under `LocalSystem` which means it is running with administrator privs. So what we can possible do is if we have the propper perms to edit some things on the server we can possible get a root shell from there.
+`Apache2.4` was running as `LocalSystem`, which meant that if I could get it to execute anything on my behalf, whether by modifying a config file it would reload or replacing a binary it would call, I'd have a path to full administrative privileges.
 
-well that didnt work so I check the registery to see if there are any credentials found in `winlogon` and I found some for the usesr `hugo` which i then `rdp` into the machine and started powershell as `administrator`.
+That angle didn't pan out for me directly, so I pivoted to checking the registry for anything Windows commonly leaves lying around, and `Winlogon` was the obvious place to look for stored logon credentials. Sure enough, it had autologon configured with a full set of credentials for the user `hugo`, which I used to RDP into the machine and start an elevated PowerShell session as `administrator`:
+
 ```bash
 PS C:\xampp\htdocs> reg query "HKLM\SOFTWARE\Microsoft\Windows NT\Currentversion\Winlogon"
 reg query "HKLM\SOFTWARE\Microsoft\Windows NT\Currentversion\Winlogon"

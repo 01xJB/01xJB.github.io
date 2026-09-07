@@ -52,9 +52,11 @@ tags:
 
 ## Overview
 
-Backdoor teaches **turning a limited file read into process discovery**. The plugin traversal only gives you files, but Linux exposes the entire process table as files under `/proc`, so a file read primitive becomes "what is running and with what arguments", which is how you find the otherwise-anonymous `gdbserver` on 1337. The `gdbserver` step is a clean, memorable primitive: an unauthenticated remote debugging daemon *is* remote code execution by design. Root is the classic **shared `screen` socket** attach.
+Backdoor is the box that really drove home a lesson I now apply on every engagement involving a file-read primitive: a limited file read is never just a limited file read on Linux. I started this one expecting the usual WordPress plugin vulnerability to hand me a shell outright, but instead it handed me something more interesting, a directory traversal bug in the `ebook-download` plugin that only let me pull files off disk. On its own that's a modest win: I could read configs and source, but nothing executable. The insight that turned the box around for me was remembering that Linux exposes its entire process table as plain files under `/proc`. Once I made that connection, my file-read bug became a process-enumeration bug: I could ask the machine "what is currently running, and with what arguments" without ever getting a shell, and that's precisely how I tracked down an otherwise silent, unnamed service sitting on port 1337.
 
-Related LFI/traversal boxes: [Inject](/writeups/hackthebox/linux/easy/inject/), [Titanic](/writeups/hackthebox/linux/easy/titanic/), [Bagel](/writeups/hackthebox/linux/medium/bagel/). Related `/proc` enumeration: [Jupiter](/writeups/hackthebox/linux/medium/jupiter/). Related unusual-service RCE: [Antique](/writeups/hackthebox/linux/easy/antique/) (JetDirect `exec`), [PC](/writeups/hackthebox/linux/easy/pc/) (gRPC). Related `screen`/`tmux` root sockets: [CyberCrafted](/writeups/tryhackme/linux/medium/cybercrafted/).
+That service turned out to be `gdbserver`, and recognizing it was the other half of the puzzle. I find this step particularly satisfying to explain because it's such a clean, teachable primitive: an unauthenticated remote debugging daemon *is* remote code execution, by design rather than by accident. There's no auth layer standing between a GDB client and arbitrary code execution as whatever user launched the stub. Root escalation, by contrast, was far more mundane and came down to a classic misconfiguration: a shared `screen` socket that let me attach to a root-owned session by simply knowing its name.
+
+I've grouped a few related boxes below because these individual techniques show up constantly in my other writeups. For more LFI/traversal chains, see [Inject](/writeups/hackthebox/linux/easy/inject/), [Titanic](/writeups/hackthebox/linux/easy/titanic/), and [Bagel](/writeups/hackthebox/linux/medium/bagel/). For more on turning a read primitive into `/proc` enumeration, see [Jupiter](/writeups/hackthebox/linux/medium/jupiter/). For unusual-service RCE in the same spirit as `gdbserver`, see [Antique](/writeups/hackthebox/linux/easy/antique/) (JetDirect `exec`) and [PC](/writeups/hackthebox/linux/easy/pc/) (gRPC). For more shared `screen`/`tmux` root sockets, see [CyberCrafted](/writeups/tryhackme/linux/medium/cybercrafted/).
 
 ---
 
@@ -73,28 +75,28 @@ PORT     STATE    SERVICE VERSION
 2605/tcp filtered bgpd
 ```
 
-(The nmap `vulners` script dumped ~90 CVE references for the SSH and Apache versions. None of them are the path; trimmed here.)
+My initial nmap scan came back with the usual noise: the `vulners` script alone dumped roughly ninety CVE references against the SSH and Apache versions in play. I skimmed through them out of due diligence, but none of them turned out to be the actual path in, so I've trimmed that output here rather than padding the writeup with dead ends.
 
-WPScan / `http-wordpress-users` confirms a single user `admin`. `dirsearch` shows a standard WP layout with `/wp-config.php` present but returning `0B` (PHP-parsed, so no source via a normal request).
+I ran WPScan alongside nmap's `http-wordpress-users` script and confirmed there was a single WordPress user, `admin`, on the box. A `dirsearch` pass showed a completely standard WordPress layout, and `/wp-config.php` was present but returned `0B`, which made sense since PHP parses that file server-side, meaning a normal HTTP request was never going to hand me the source directly.
 
-`http://backdoor.htb/wp-links-opml.php` renders XML with a `<!-- generator="WordPress/5.8.1" -->` comment. The service on **1337** answers but says nothing:
+Poking at `http://backdoor.htb/wp-links-opml.php`, I got back XML containing a `<!-- generator="WordPress/5.8.1" -->` comment, which pinned down the exact WordPress version I was dealing with. I also circled back to that mystery service on port **1337** to see if it would say anything unprompted:
 
 ```console
 ❯ nc backdoor.htb 1337 -vv
 backdoor.htb [10.10.11.125] 1337 (menandmice-dns) open
 ```
 
-`menandmice-dns` is just nmap's guess from the port number. Ignore it.
+The `menandmice-dns` label nmap attached to it is nothing more than a guess based on the port number, since 1337 has no fixed association with that service, so I disregarded it and kept treating the port as unknown.
 
 ### Plugin directory traversal
 
-Browsing `http://backdoor.htb/wp-content/plugins/` (directory listing is on) reveals **`ebook-download`**.
+Since chasing WordPress user enumeration wasn't leading anywhere fast, I decided to poke at the plugins directory directly. Directory listing was enabled on `http://backdoor.htb/wp-content/plugins/`, which handed me the full plugin list without any guesswork, and one name immediately caught my eye: **`ebook-download`**, a plugin I recognized as having a history of disclosed vulnerabilities.
 
 <div class="callout callout-note">
 
 **`ebook-download` traversal (EDB-39575)**
 
-The plugin's `filedownload.php` takes an `ebookdownloadurl` parameter and streams whatever path it points to, with **no traversal filtering and no auth**. `?ebookdownloadurl=../../../wp-config.php` walks out of the plugin folder to the WordPress root. Because the file is *streamed as a download* rather than executed, you get the raw PHP source, including DB credentials that a normal request would never show. The response is prefixed with the payload string echoed a few times (the plugin's own bug); strip that off.
+Digging into `filedownload.php`, I found it takes an `ebookdownloadurl` parameter and streams back whatever path is handed to it, with **no traversal filtering and no authentication check** at all. That meant a payload like `?ebookdownloadurl=../../../wp-config.php` could walk straight out of the plugin's folder and land on the WordPress root, pulling files I was never meant to see. What made this especially useful is that the file gets *streamed as a download* rather than executed by the PHP interpreter, so I got back the raw source of `wp-config.php` instead of a blank page, database credentials included, something a normal request to that file would never expose. One annoyance I ran into: the response comes back with the payload string echoed a few times at the top, a bug in the plugin's own code, so I had to strip that off before the PHP source underneath was usable.
 
 </div>
 
@@ -109,9 +111,11 @@ define( 'DB_PASSWORD', 'MQYBJSaD#DxG6qbm' );
 define( 'DB_HOST', 'localhost' );
 ```
 
-The DB creds don't lead anywhere directly (MySQL isn't exposed), so use the traversal as a **generic LFI**. A browser adds a `<script>window.close()</script>` because of the plugin's `Content-Disposition` weirdness; `curl` avoids that. Reading `/etc/passwd` confirms the primitive works and shows a `user` account.
+Those database credentials didn't lead anywhere useful on their own since MySQL wasn't exposed externally, so I decided to treat the traversal as a **generic LFI** primitive instead and see how far I could push it. I also noticed that hitting the endpoint from a browser triggers a `<script>window.close()</script>` tacked onto the response, a side effect of the plugin's odd `Content-Disposition` handling, so I switched to `curl` for every subsequent request to avoid that noise entirely. As a sanity check that the primitive was solid, I read `/etc/passwd` first and confirmed it worked cleanly, which also told me there was a `user` account on the box worth keeping in mind.
 
 ### `/proc` → find `gdbserver`
+
+With the LFI confirmed, I turned to an idea that had been forming in my head as I worked: if this is genuinely an arbitrary file read, I should be able to read anything the web server's user can see, and on Linux that includes the entire contents of `/proc`. My plan was to first get a rough sense of how many processes were running on the box, then loop through every PID's `cmdline` file looking for anything unusual.
 
 ```bash
 # how many PIDs? read the scheduler debug file

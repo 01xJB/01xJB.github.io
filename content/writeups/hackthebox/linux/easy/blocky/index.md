@@ -53,9 +53,9 @@ tags:
 
 ## Overview
 
-Blocky is one of the original HTB boxes and still the canonical example of **"credentials in a compiled artifact"**. A Java `.jar` is just a zip of `.class` bytecode; bytecode decompiles cleanly back to near-original source, so any secret a developer hard-codes in a plugin/agent/app is trivially recoverable once you can download the file. The rest is **password reuse** (dev used the same string for MySQL and their Linux account) and a throwaway `sudo ALL` misconfiguration. Total path: download → decompile → reuse → `sudo su`.
+Blocky is one of the oldest boxes on HackTheBox, and it's still the canonical teaching example for a vulnerability class I run into constantly on real assessments: credentials baked directly into a compiled artifact. My reasoning going in, once I spotted an exposed plugins directory, was straightforward: a Java `.jar` file is nothing more than a zip archive of `.class` bytecode, and that bytecode retains enough structure (field names, method signatures, string constants) that a decompiler reconstructs something extremely close to the original source. Any secret a developer hard-codes into a plugin, an agent, or a desktop app is trivially recoverable the moment you can pull the file down. Everything past that point on this box comes down to two classic mistakes stacked on top of each other: the same MySQL password reused as a Linux login password, and the resulting shell landing on a throwaway unrestricted-sudo rule. The full chain, in the order I actually worked it: find the exposed jar, decompile it, reuse the recovered credential across two different services, then `sudo su` straight to root.
 
-Related "secrets in a downloadable file" boxes: [Backdoor](/writeups/hackthebox/linux/easy/backdoor/) (`wp-config.php` via traversal), [Cat](/writeups/hackthebox/linux/medium/cat/) (`.git` source). Related password-reuse-to-root: [Dog](/writeups/hackthebox/linux/easy/dog/), [Cat](/writeups/hackthebox/linux/medium/cat/), [Smol](/writeups/tryhackme/linux/medium/smol/). Related unrestricted-`sudo` finish: [Blocky](/writeups/hackthebox/linux/easy/blocky/) itself is the textbook case.
+I've run into this exact "secrets in a downloadable file" pattern on a handful of other boxes worth cross-referencing: [Backdoor](/writeups/hackthebox/linux/easy/backdoor/) exposes `wp-config.php` through a directory traversal bug, and [Cat](/writeups/hackthebox/linux/medium/cat/) leaks source through an exposed `.git` directory. The password-reuse-to-root pattern shows up again on [Dog](/writeups/hackthebox/linux/easy/dog/), [Cat](/writeups/hackthebox/linux/medium/cat/), and [Smol](/writeups/tryhackme/linux/medium/smol/). And for an unrestricted-`sudo` finish, [Blocky](/writeups/hackthebox/linux/easy/blocky/) itself is about as textbook a case as they come.
 
 ---
 
@@ -71,9 +71,9 @@ PORT      STATE  SERVICE   VERSION
 25565/tcp open   minecraft Minecraft 1.11.2 (Message: A Minecraft Server, Users: 0/20)
 ```
 
-(`nmap --script vulners` dumped ~200 lines of CVE references for the old SSH/Apache builds. None are the path; trimmed.)
+I also ran `nmap --script vulners` against the host, which threw back roughly two hundred lines of CVE references tied to the aging SSH and Apache builds. None of them turned out to be the actual way in, so I've trimmed that output here and gone straight to what mattered.
 
-`http-enum` / nikto findings that matter:
+The `http-enum` and nikto scans against port 80 turned up the findings that actually drove the rest of the assessment:
 
 ```console
 /phpmyadmin/: phpMyAdmin
@@ -82,7 +82,7 @@ PORT      STATE  SERVICE   VERSION
 Username found: notch
 ```
 
-`http://blocky.htb/phpmyadmin/`. Seems to be running phpMyAdmin. WPScan / `http-wordpress-users` identifies one author: **`notch`**.
+Browsing to `http://blocky.htb/phpmyadmin/` confirmed a live phpMyAdmin instance sitting alongside the WordPress install, which meant credentials for one service could plausibly unlock the other further down the line. I ran WPScan's `http-wordpress-users` enumeration against the WordPress side next, and it identified a single author account: **`notch`**.
 
 ```console
 [+] notch
@@ -90,19 +90,19 @@ Username found: notch
  | Confirmed By: Login Error Messages (Aggressive Detection)
 ```
 
-`http://blocky.htb/plugins/`. There seems to be plugins here (directory listing), containing `BlockyCore.jar` and `griefprevention-..jar`.
+With the username in hand, I went looking for anywhere I could pull down more than just a name. Navigating to `http://blocky.htb/plugins/` turned up an open directory listing exposing two Minecraft server plugin jars sitting in the clear: `BlockyCore.jar` and `griefprevention-..jar`. The first one immediately stood out to me. It's a custom, project-specific name rather than a well-known public plugin, which usually means it was written in-house and is far more likely to contain something the developer never meant to publish.
 
 <div class="callout callout-note">
 
 **Directory listing is an information-disclosure vuln**
 
-`Options +Indexes` (or the default on a fresh Apache vhost) makes any directory without an index file render as a file browser. On a WordPress box the interesting spots are `/wp-content/uploads/`, `/wp-content/plugins/`, `/wp-content/backups/`. Here it exposes a *custom* plugin nobody was meant to download. Same primitive on [Backdoor](/writeups/hackthebox/linux/easy/backdoor/).
+This is `Options +Indexes` at work, whether explicitly set or left over from a default Apache vhost, and it turns any directory lacking an index file into a browsable file listing. On a WordPress install I always check the same handful of spots for this: `/wp-content/uploads/`, `/wp-content/plugins/`, and `/wp-content/backups/`, since that's where developers tend to drop things temporarily and forget about them. Here it exposed a custom, purpose-built plugin that was never meant to be publicly downloadable. I ran into the exact same primitive on [Backdoor](/writeups/hackthebox/linux/easy/backdoor/), where a different misconfiguration exposed `wp-config.php` instead.
 
 </div>
 
 ### Decompile the jar
 
-so we did some research about decompiling java files. we went to the plugins page on the website, downloaded the `BlockyCore.jar`, and used **jd-gui** to see what's in it ;3
+Since I hadn't decompiled a Java plugin before, I spent a few minutes reading up on the tooling before diving in. Once I had a feel for it, I pulled `BlockyCore.jar` down from the plugins directory and opened it in **jd-gui**, a graphical Java decompiler, to see exactly what the developer had shipped inside it.
 
 ```bash
 jd-gui BlockyCore.jar
@@ -129,19 +129,19 @@ public class BlockyCore {
 
 **Why `.jar` secrets always come back**
 
-A `.jar` is a zip archive of `.class` files. Java bytecode keeps field names, method signatures, string constants and (usually) local-variable tables, so decompilers like **jd-gui**, **CFR**, **procyon** or **Fernflower** reproduce readable source. `unzip -o BlockyCore.jar && strings **/*.class | grep -i pass` finds it even faster. The same is true of.NET assemblies (dnSpy/ILSpy), Android APKs (jadx), and Electron apps (`asar extract`). **Never ship a credential in client-distributable code.**
+The reason this works so reliably is structural, not incidental. A `.jar` file is just a zip archive of `.class` files, and Java bytecode preserves field names, method signatures, string constants, and usually even local-variable tables. That's more than enough for decompilers like **jd-gui**, **CFR**, **procyon**, or **Fernflower** to reconstruct source that reads almost exactly like what the developer originally typed. If I'd wanted to skip the GUI entirely, `unzip -o BlockyCore.jar && strings **/*.class | grep -i pass` would have surfaced the same password just as fast. The same weakness carries over to .NET assemblies (crackable with dnSpy or ILSpy), Android APKs (jadx), and Electron desktop apps (`asar extract`). The takeaway I keep coming back to on every engagement: never ship a credential inside client-distributable code, full stop.
 
 </div>
 
 ### phpMyAdmin → confirm `notch`
 
-we are able to log into the phpMyAdmin page using the creds above.
+With a MySQL root password in hand, logging into the phpMyAdmin panel I'd spotted earlier was the obvious next move.
 
 ```
 http://blocky.htb/phpmyadmin/sql.php?db=wordpress&table=wp_users
 ```
 
-here we can see the user `notch` and his password hash. (You could crack the WP hash, but there's a shorter path.)
+Querying the `wp_users` table this way surfaced the account `notch` along with its password hash. Cracking that WordPress hash was one option, but I already had a faster route available: try the recovered SQL password as this same user's system password.
 
 ### Password reuse → SSH → user
 

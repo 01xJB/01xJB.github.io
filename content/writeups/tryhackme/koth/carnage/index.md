@@ -30,7 +30,7 @@ tags:
 
 ## Full Walkthrough
 
-http://10.10.27.0/upload/
+I started by browsing to `http://10.10.27.0/upload/`, which hinted early on that file upload functionality was going to be central to this hill, before I'd even finished a proper scan. A port sweep against the target confirmed six services worth working through:
 
 Open 10.10.27.0:22
 Open 10.10.27.0:80
@@ -39,15 +39,9 @@ Open 10.10.27.0:81
 Open 10.10.27.0:83
 Open 10.10.27.0:9999
 
+With four separate web ports stacked next to each other, my read was that each one likely hosted a distinct service, and given the upload path I'd already noticed, port 82 was the natural place to start. Sure enough, `http://10.10.27.0:82/` served up a straightforward file upload form.
 
-go to 
-http://10.10.27.0:82/
-
-
-upload reverse php but make it .png instead
-
-
-in the request send to repeater and should look like this
+My plan going in was to upload a PHP reverse shell disguised as a PNG, so it would slide past whatever validation the form was performing on the way in, then find a way to get it executed as PHP once it was sitting on the server. I intercepted the upload in Burp, sent it to Repeater, and shaped the multipart body so the file presented itself as an innocent image:
 
 
 <!-- request -->
@@ -273,15 +267,15 @@ function printit ($string) {
 
 <!--  -->
 
-change file extention or add onto it .php
+Once that request went through, the last piece was making sure the uploaded file would actually be interpreted as PHP rather than served back as a static image, so I renamed it, adding a `.php` extension onto the file that was now sitting on the server, and browsing to that new path handed me a shell as `www-data`.
 
-
-sudo method to go tmp tmux then
-
+Root didn't need an exploit at all. My instinct whenever I land a low-privilege shell on a shared box is to check `/tmp` and similar world-writable paths for anything left running that shouldn't be, and this hill delivered exactly that: a detached `tmux` session, still alive, belonging to root. Attaching to it took nothing more than pointing at the right socket:
 
 tmux -S default attach
 
-ROOT PWNED ;3
+That dropped me straight into a live root session, no privilege escalation technique required beyond knowing where to look. Root, pwned.
+
+Both flags for this hill came out of that session:
 
 thm{7dcad4ed4067a5a0d58e92fd022e35f4}
 
@@ -289,4 +283,4 @@ thm{8934b42e39ea3a1529b36390954f0f2a}
 
 thm{8934b42e39ea3a1529b36390954f0f2a}
 
-script /dev/pts/<PID>
+One habit worth carrying forward from this room: whenever a shell feels unstable or I need a properly interactive TTY to run something like `tmux` cleanly, `script /dev/pts/<PID>` is a fast way to capture a real terminal without needing Python or socat available on the target.

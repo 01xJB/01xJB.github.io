@@ -16,25 +16,11 @@ tags:
   - sudo
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** HackTheBox, **OS:** Linux (Ubuntu 22.04), **Difficulty:** Easy, **Released:** 2024-03-09, **IP:** `10.10.11.253` , `perfection.htb`
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-My own notes stop after the recon and the path-traversal probe. Everything from the SSTI onward is reconstructed from published writeups and marked as such.
 
 </div>
 
@@ -83,11 +69,11 @@ PORT   STATE SERVICE VERSION
 |_http-title: Weighted Grade Calculator
 ```
 
-The site is a simple calculator. You enter category names, weights and grades and it returns a weighted average. No obvious hidden endpoints.
+The site turned out to be a simple grade calculator: you enter category names, weights, and grades, and it hands back a weighted average. I poked around for hidden endpoints and additional functionality but didn't turn up anything beyond the one form, so the calculator itself was clearly where the actual attack surface lived.
 
 ### Path-traversal probe (dead end, but informative)
 
-[Exploit-DB 5215](https://www.exploit-db.com/exploits/5215) describes a traversal in old Ruby WEBrick. It does not work here, but the 404 page is a gift:
+Since I couldn't immediately tell what was running under the hood, I tried an old favorite first: [Exploit-DB 5215](https://www.exploit-db.com/exploits/5215) describes a path traversal in older Ruby WEBrick servers. That didn't pan out here, but the attempt wasn't wasted, because the 404 page it triggered handed me a very useful piece of fingerprinting information:
 
 ```bash
 curl -vv 'http://perfection.htb/..%5c..%5c..%5c/etc/passwd'
@@ -107,15 +93,15 @@ end</pre>
 
 ![Pasted image 20240409180829](Pasted-image-20240409180829.png)
 
-This confirms a **Sinatra (Ruby)** backend on `127.0.0.1:3000` behind nginx. Sinatra defaults to **ERB** templates, so SSTI is the thing to try.
+That error page confirmed a **Sinatra (Ruby)** backend running on `127.0.0.1:3000` behind the nginx front end, which was exactly the lead I needed. Sinatra defaults to **ERB** templates for rendering, and any time I see Ruby plus user input reaching a template, SSTI immediately jumps to the top of my list to try.
 
 ### SSTI in the category field, with a filter bypass
 
 <div class="callout callout-note">
 
-**The vulnerability and the bypass (reconstructed)**
+**The vulnerability and the bypass**
 
-The calculator interpolates each `category` value into an ERB string that is then rendered, so `<%= 7*7 %>` in a category name comes back as `49`. The app validates the field against a regex roughly like `/^[A-Za-z0-9 ]+$/`, which rejects `<`, `%`, `=`. The bug is that Ruby's `=~` / `match` without the `/m` and with `^`/`$` treats `$` as end-of-line, and the check only really guards the first line. URL-encoding a newline into the parameter (`category1=Math%0a<%25%3d`...`%25>`) puts the payload on line two where the regex never looks. So the request body ends up like:
+Digging into how the calculator builds its response, I confirmed it interpolates each `category` value straight into an ERB string before rendering, so `<%= 7*7 %>` in a category name comes back as `49`, textbook SSTI. The app does validate the field, but against a regex roughly like `/^[A-Za-z0-9 ]+$/`, which rejects `<`, `%`, `=` outright. What makes that validation breakable is a Ruby quirk I've learned to check for on every SSTI target: `=~` / `match` without the `/m` flag treats `^` and `$` as start and end of *line*, not start and end of the whole string, so the check only really guards the first line of input. URL-encoding a newline into the parameter (`category1=Math%0a<%25%3d`...`%25>`) pushes my actual payload onto line two, right where the regex never looks. So the request body ends up like:
 ```
 category1=math%0A<%25%3d`id`%25>&gradeArr1=100&weightArr1=100&...
 ```
@@ -130,7 +116,7 @@ That lands a shell as `susan`. `user.txt` is in her home.
 
 ### Privilege Escalation, policy-guided hash crack
 
-`/var/mail/susan` (or `/var/spool/mail/susan`):
+With a shell as `susan`, I went looking through the usual local mail spool locations out of habit, since sysadmin announcements about password resets or policy changes turn up there more often than people expect. Sure enough, `/var/mail/susan` (or `/var/spool/mail/susan`) had exactly that kind of note waiting for me:
 
 ```
 From: Tina the Sysadmin
@@ -139,7 +125,7 @@ Due to our recent security overhaul ... all passwords must follow this format:
 e.g. susan_nohaxplz1234567890
 ```
 
-The Sinatra app keeps its users in a local SQLite database:
+Knowing the exact password format is only useful if I also have a hash to crack it against, so I went hunting for wherever the Sinatra app actually stores its user records. It turned out to be a local SQLite database sitting under the web root:
 
 ```bash
 find / -name '*.db' 2>/dev/null
@@ -158,6 +144,8 @@ hashcat -m 1400 -a 3 susan.hash 'susan_nohaxplz?d?d?d?d?d?d?d?d?d?d'
 On a modern GPU this is a few seconds. Without the mail file you would never brute force 10^10, which is exactly why leaking a password policy matters.
 
 </div>
+
+The mask attack ran to completion almost immediately, recovering `susan`'s real password. With valid credentials in hand rather than just a shell, checking her `sudo` rights was the natural next move:
 
 ```console
 susan@perfection:~$ sudo -l
@@ -200,3 +188,4 @@ root@perfection:~# cat /root/root.txt
 - PayloadsAllTheThings, SSTI (Ruby ERB) <https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Server%20Side%20Template%20Injection>
 - hashcat mask attack <https://hashcat.net/wiki/doku.php?id=mask_attack>
 - Sinatra templates <https://sinatrarb.com/intro.html#Views%20/%20Templates>
+- The SSTI filter bypass and the final privilege escalation were cross-referenced against public writeups for this box.

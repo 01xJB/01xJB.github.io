@@ -31,7 +31,7 @@ tags:
 
 ## Full Walkthrough
 
-http://10.10.180.76:8080/
+I began by taking a look at the web service running on the target, browsing to http://10.10.180.76:8080/ to see what was actually being served there before turning my attention elsewhere. A follow-up nmap scan against the host gave me a clearer picture of what I was dealing with:
 
 ```console
 PORT     STATE SERVICE VERSION
@@ -43,6 +43,8 @@ Aggressive OS guesses: Linux 3.1 (95%), Linux 3.2 (95%), AXIS 210A or 211 Networ
 No exact OS matches for host (test conditions non-ideal).
 Network Distance: 4 hops
 ```
+
+The web service on 8080 turned out to be little more than a bare Node.js/Express instance, so I widened the scan and found something far more interesting: an FTP service tucked away on the non-standard port 10021. I connected to it directly to see what banner it presented and whether an anonymous or guessable account would get me anywhere:
 
 
 ❯ k1b0r@FR13NDSthm/boxes/Net_Sec_Challenge took 37s 
@@ -56,6 +58,9 @@ Password:
 Remote system type is UNIX.
 Using binary mode to transfer files.
 ftp> 
+
+
+The vsFTPd 3.0.3 banner and the fact that the username `eddie` was accepted before the password prompt stopped me told me I had a legitimate account to brute-force against. I put together a small wordlist of candidate usernames and pointed Hydra at the FTP service using rockyou.txt for passwords:
 
 
 ❯ k1b0r@FR13NDSthm/boxes/Net_Sec_Challenge via 🐍 v3.10.1 took 7s 
@@ -73,6 +78,9 @@ Hydra (https://github.com/vanhauser-thc/thc-hydra) starting at 2022-01-10 21:09:
 ❯ k1b0r@FR13NDSthm/boxes/Net_Sec_Challenge via 🐍 v3.10.1 took 3m3s 
 
 
+I ended up cancelling that run partway through, since the target's IP had shifted underneath me (a fairly common occurrence on TryHackMe when a machine resets), so I restarted the attack against the new address instead:
+
+
 ❯ k1b0r@FR13NDSthm/boxes/Net_Sec_Challenge via 🐍 v3.10.1 
 ❯ hydra -L users -P /opt/SecLists/Passwords/rockyou.txt ftp://10.10.0.245:10021 -t 64
 Hydra v9.2 (c) 2021 by van Hauser/THC & David Maciejak - Please do not use in military or secret service organizations, or for illegal purposes (this is non-binding, these *** ignore laws and ethics anyway).
@@ -88,9 +96,8 @@ Hydra (https://github.com/vanhauser-thc/thc-hydra) starting at 2022-01-10 21:29:
 [ERROR] 0 target did not complete
 
 
-we need to use attack box for website
+With two valid FTP credential pairs recovered, `eddie:jordan` and `quinn:andrea`, I still wanted to check the website itself more closely, and since the target sat on TryHackMe's internal 10.10.0.0/16 range, that meant working from the AttackBox rather than my own host in order to actually reach it.
 
+For a quick, stealthier reconnaissance pass I also like to reach for a null scan, `nmap -sN ip`, which sends packets with no flags set at all and can slip past some of the basic stateful filtering that a normal SYN scan would trip.
 
-nmap -sN ip
-
-PWNED ;3
+Between the leaked FTP banner and a straightforward wordlist brute-force, this one folded quickly, an easy but satisfying finish.

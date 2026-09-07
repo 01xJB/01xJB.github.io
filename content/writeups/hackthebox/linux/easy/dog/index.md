@@ -55,9 +55,9 @@ tags:
 
 ## Overview
 
-Dog is a compact chain of four well-worn primitives: **`.git` disclosure** for the DB password, an **error-message username oracle** to find the one account that password unlocks, an **authenticated CMS RCE** for `www-data`, and **password reuse** + a **GTFOBins-style `sudo` binary** (`bee eval`) for root. Nothing requires exploitation development. It rewards methodical enumeration and the habit of trying every recovered secret against every known account.
+Dog turned out to be a great reminder that you don't need a single flashy zero-day to fully compromise a box, you just need to be relentless about connecting the small pieces of information you find along the way. Looking back at the full chain, it's really four well-worn primitives stacked on top of each other: a `.git` disclosure that leaked a database password, an error-message username oracle that told me exactly which account that password belonged to, an authenticated CMS RCE that got me a shell as `www-data`, and finally password reuse combined with a GTFOBins-style `sudo` binary (`bee eval`) that got me to root. None of these individually required writing new exploit code or chaining anything exotic. What actually mattered was discipline: dumping the git repository thoroughly, reading every file it gave me instead of skimming for the first credential I saw, and then, critically, trying that one recovered password against every account I could identify rather than assuming it only applied to the CMS.
 
-Related `.git` boxes: [Cat](/writeups/hackthebox/linux/medium/cat/), [Pilgrimage](/writeups/hackthebox/linux/easy/pilgrimage/). Related username oracles: [Nocturnal](/writeups/hackthebox/linux/easy/nocturnal/), [Previse](/writeups/hackthebox/linux/easy/previse/). Related `sudo <interpreter>` → root: [Bizness](/writeups/hackthebox/linux/easy/bizness/), and see GTFOBins throughout [Lookup](/writeups/tryhackme/linux/easy/lookup/) / [BackFire](/writeups/hackthebox/linux/medium/backfire/). Related password-reuse-to-root: [Blocky](/writeups/hackthebox/linux/easy/blocky/), [Cat](/writeups/hackthebox/linux/medium/cat/), [Smol](/writeups/tryhackme/linux/medium/smol/).
+I've run into variations on nearly every piece of this chain elsewhere. The `.git` disclosure pattern shows up again on [Cat](/writeups/hackthebox/linux/medium/cat/) and [Pilgrimage](/writeups/hackthebox/linux/easy/pilgrimage/). Username oracles in login forms are exactly what tripped up the target on [Nocturnal](/writeups/hackthebox/linux/easy/nocturnal/) and [Previse](/writeups/hackthebox/linux/easy/previse/). The `sudo <interpreter>` escalation pattern, where a management CLI or scripting language runtime is left runnable as root, is the same idea behind [Bizness](/writeups/hackthebox/linux/easy/bizness/), and GTFOBins-flavored escalations turn up repeatedly across [Lookup](/writeups/tryhackme/linux/easy/lookup/) and [BackFire](/writeups/hackthebox/linux/medium/backfire/). And the password-reuse-to-root pattern here mirrors what worked on [Blocky](/writeups/hackthebox/linux/easy/blocky/), [Cat](/writeups/hackthebox/linux/medium/cat/), and [Smol](/writeups/tryhackme/linux/medium/smol/).
 
 ---
 
@@ -75,9 +75,11 @@ PORT   STATE SERVICE VERSION
 |_http-generator: Backdrop CMS 1 (https://backdropcms.org)
 ```
 
-`nmap` already found `/.git/` and fingerprinted **Backdrop CMS**.
+A standard nmap service scan against the host did most of the initial recon work for me here. Its scripts flagged an exposed `/.git/` directory on the web root and fingerprinted the application running on top of it as Backdrop CMS, both details that immediately told me where to focus first.
 
 ### Dump `.git`
+
+An exposed `.git` directory on a live web server is effectively a source code and history leak, so my first move was to pull the entire object store down locally rather than try to browse it over HTTP:
 
 ```console
 $ ./gitdumper.sh http://dog.htb/.git/ dest-dir
@@ -92,15 +94,17 @@ $ ./extractor.sh ../Dumper/dest-dir/ Dog
 
 **`.git` disclosure (see [Cat](/writeups/hackthebox/linux/medium/cat/) for the full explanation)**
 
-`gitdumper` pulls the object store by path; `extractor` replays each commit into its own folder. On Dog the payoff is `settings.php`. Backdrop's DB config. Plus config JSON and commit author emails that seed the username list.
+For anyone who wants the deeper mechanics of why this works, I cover it in more detail in my Cat writeup, but the short version is that `gitdumper` walks the exposed `.git` directory and pulls down the raw object store file by file, and `extractor` then replays every commit in that history into its own folder on disk. On Dog, that gave me two separate wins at once: `settings.php`, which held Backdrop's live database configuration, and a handful of configuration JSON files and commit author metadata that seeded a working list of usernames to test.
 
 </div>
 
-used the extractor's `settings.php`:
+Reading through what the extractor pulled out, the database configuration inside `settings.php` was sitting in plaintext:
 
 ```php
 $database = 'mysql://root:BackDropJ2024DS2024@127.0.0.1/backdrop';
 ```
+
+While I had the full repository history on disk, it made sense to grep across everything for the box's domain rather than only check the obvious files, since commit metadata often leaks emails and usernames that don't appear anywhere in the current codebase:
 
 ```console
 $ grep -iR 'dog.htb' Dog/
@@ -110,7 +114,7 @@ $ grep -iR 'dog.htb' Dog/
 
 ### Enumerating users
 
-I was able to use hydra to find a valid user `john`. The password does not work for login on the website, but instead of saying the user doesn't exist it says **"Cannot send email"**.
+With a candidate password in hand and a couple of email addresses pulled from the commit history, my next question was which account, if any, that password actually belonged to. Poking at the login form manually, I noticed something useful: submitting an email that doesn't exist in the system returns "Sorry, no account with that email address found," while submitting one that does exist, just with a password Backdrop can't use to log in, returns a completely different message, **"Cannot send email."** That discrepancy is a textbook username oracle, so I automated the check with hydra against a large username list, using the recovered database password as the fixed password and watching for which attempts didn't return the "no account" failure string:
 
 ```bash
 hydra -L /usr/share/seclists/Usernames/xato-net-10-million-usernames.txt \
@@ -126,27 +130,27 @@ hydra -L /usr/share/seclists/Usernames/xato-net-10-million-usernames.txt \
 
 **Login forms as username oracles**
 
-Backdrop returns a *different* string for "no such account" vs "account exists but the password is wrong / can't email you a reset". That difference is a **user-enumeration oracle**: hydra's `:F=<fail string>` (or here matching the failure text) tells valid from invalid. Once you know the account exists, the recovered DB password often just works. Devs reuse it. Fix: generic "if that account exists, we've emailed you" responses and constant-time handling.
+The reason this kind of oracle is so reliable is that developers rarely think about the information leaked by their error branches, they're focused on giving the user a helpful message, not on what that message confirms to an attacker. Backdrop returning a distinctly different string for "no such account" versus "account exists but can't log in this way" gave hydra exactly the differential it needed: pointing it at the failure string lets it flag any response that doesn't match as a hit. Once I knew `john` was a real account, trying the database password against it was an obvious next step, and it worked immediately, which says a lot about how often the same credential gets reused between a database connection string and a human-facing account. The fix on the defensive side is straightforward: return an identical, generic response regardless of whether the account exists ("if that account exists, we've sent a reset email"), and handle both branches in constant time so a timing side channel doesn't reopen the same oracle.
 
 </div>
 
 ### Backdrop admin → CVE-2022-45903 → www-data
 
-Log into `/?q=admin` as `john : BackDropJ2024DS2024`.
+With valid admin credentials confirmed, logging into the Backdrop administration panel at `/?q=admin` as `john : BackDropJ2024DS2024` was straightforward.
 
 <div class="callout callout-note">
 
 **CVE-2022-45903, Backdrop CMS authenticated RCE**
 
-An admin can install modules from an uploaded archive. Backdrop doesn't verify the archive contents, so a module directory containing a `.php` webshell plus a minimal `.info` file installs and becomes web-reachable under `/modules/<name>/`. Any admin session is code execution. (Also delivered via the "manual installation" URL feature.)
+Once I had admin access, I already knew where this was likely headed, since Backdrop CMS has a well-documented authenticated RCE tracked as CVE-2022-45903, and I wanted to understand exactly why it works before just running an exploit blindly. The module installer lets an administrator upload an archive and have Backdrop extract and register it as a new module, but the application never actually validates what's inside that archive. That means a module directory containing nothing more than a `.php` webshell and a minimal `.info` metadata file installs cleanly and becomes reachable directly under `/modules/<name>/` once the install finishes. In other words, any account with admin access is one archive upload away from arbitrary code execution, a serious design flaw for a feature most admins would assume is at least loosely sandboxed. Backdrop's "manual installation" URL-based install flow offers the same path in, for what it's worth.
 
 </div>
 
-uploaded `shell.tar`, then got a shell by visiting `http://dog.htb/modules/shell/shell.php`.
+I built a minimal module archive containing a PHP webshell alongside the required `.info` file, uploaded it as `shell.tar` through the module installer, and once Backdrop finished registering it, browsing to `http://dog.htb/modules/shell/shell.php` gave me code execution as `www-data`.
 
 ### User. Password reuse
 
-`johncusack` exists in `/home`; **reuse the DB password**:
+Checking `/home` from my new shell showed a single local account, `johncusack`, and given how far a bit of password reuse had already gotten me on this box, testing the same Backdrop database password against it was the obvious next move, and it worked:
 
 ```bash
 su johncusack        # BackDropJ2024DS2024   (SSH also works)
@@ -154,6 +158,8 @@ cat user.txt
 ```
 
 ### Privilege Escalation. `sudo bee eval`
+
+Checking `sudo -l` as `johncusack` showed I could run `/usr/local/bin/bee`, Backdrop's command-line management tool, as root without a password. `bee` ships an `eval`/`ev` subcommand specifically for running arbitrary PHP inside the site's bootstrapped context, which meant I effectively had a root-level PHP interpreter available to me. Rather than do anything fancy in PHP, I used it to drop a SUID copy of bash, the simplest and most reliable way to convert arbitrary code execution as root into a stable root shell:
 
 ```console
 (remote) johncusack@dog:/var/www/html$ sudo /usr/local/bin/bee ev "system('cp /bin/bash /tmp/bash && chmod u+s /tmp/bash')"
@@ -166,7 +172,7 @@ cat user.txt
 
 **`bee` = Backdrop's Drush**
 
-`bee` (like `drush`) is a management CLI that bootstraps the CMS and exposes `eval`/`ev` to run arbitrary PHP in the site context. Run via `sudo` it's PHP running as root, which is instant privilege escalation, the same class as `sudo php`, `sudo perl`, `sudo python` on GTFOBins. `bee` must be invoked from the site root, so `cd /var/www/html` first.
+If you haven't run into `bee` before, think of it as Backdrop's equivalent of Drupal's `drush`: a management CLI that bootstraps the full CMS environment so administrators can run maintenance tasks, clear caches, or evaluate PHP snippets directly against the site. That last capability is the problem. Handed a `sudo` entry, `bee eval` is functionally identical to `sudo php -r`, which GTFOBins has documented for years as an instant path to root, the CLI just happens to be a Backdrop-specific wrapper instead of the raw interpreter. One quirk worth noting for anyone reproducing this: `bee` needs to be invoked from the Backdrop site root to correctly bootstrap the application, so `cd /var/www/html` first or the `eval` call fails to find the site context it needs.
 
 </div>
 
@@ -183,12 +189,12 @@ cat user.txt
 
 ## Lessons & Takeaways
 
-- **Never serve `.git/`.** Block dotfiles at the web server; deploy from artifacts.
-- **Don't commit real credentials**. `settings.php` with a live password should never enter version control.
-- **Suppress user-enumeration oracles** in auth and password-reset flows.
-- **Patch Backdrop** and restrict who can install modules; treat "install from archive" as RCE.
-- **Unique passwords**. The DB password unlocking a shell account is the whole box.
-- **`sudo` on any interpreter/management CLI is root.** Audit for `bee`, `drush`, `wp`, `artisan`, `rails`, `node`, `php`.
+- **Never let `.git/` be reachable over HTTP.** This single misconfiguration is what unraveled the entire box for me, a database password, several usernames, and enough context to understand the application's structure, all from files that were never meant to leave the deployment pipeline. Block dotfiles at the web server level (`location ~ /\.git { deny all; }` in nginx, or the Apache equivalent) and, better yet, deploy from built artifacts rather than `git pull`-ing a working copy straight onto a production web root.
+- **Real credentials should never enter version control, full stop.** `settings.php` with a live, working database password baked in is the kind of thing that feels harmless in a private repo and becomes catastrophic the moment that repo (or just its `.git` metadata) is exposed. Secrets belong in environment variables or a secrets manager, injected at deploy time, never committed.
+- **User-enumeration oracles in login and password-reset flows are worth taking seriously, even though they feel minor on their own.** By themselves they don't grant access, but paired with a leaked credential from anywhere else, which is exactly what happened here, they tell an attacker precisely which account to point that credential at. Return identical, generic responses regardless of whether the account exists, and make sure both code paths take the same amount of time.
+- **Treat "install from an uploaded archive" as remote code execution, because functionally it is.** CVE-2022-45903 exists because Backdrop trusted the contents of an admin-uploaded archive without validating what was inside it. Any feature that lets a privileged user push arbitrary files onto the server needs to either restrict file types explicitly or run in a properly sandboxed, non-web-reachable location. Keeping the CMS patched matters here too, this vulnerability has a public advisory and exploit code.
+- **Unique, non-reused passwords would have stopped this chain cold at multiple points.** The same database password unlocked the CMS admin account and then the underlying Linux user account. One password compromise turned into a full account takeover and a root path, purely because it was reused across trust boundaries that should never have shared a secret.
+- **Any `sudo` rule granting access to an interpreter or a management CLI is functionally a root shell.** `bee eval`, like `drush`, `wp eval`, `artisan tinker`, `rails runner`, `node -e`, or plain `sudo php`, all hand you a code execution primitive at the elevated privilege level. When auditing `sudo -l` output, I treat any of these as an immediate root path rather than something to investigate further, and as a defender, I'd never grant `sudo` access to a CLI capable of evaluating arbitrary code in its own runtime.
 
 ---
 

