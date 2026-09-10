@@ -8,6 +8,7 @@ sidebar:
 
 {{< cards >}}
   {{< card link="escapetwo" title="EscapeTwo" >}}
+  {{< card link="forest" title="Forest" >}}
   {{< card link="omni" title="Omni" >}}
   {{< card link="support" title="Support" >}}
 {{< /cards >}}
