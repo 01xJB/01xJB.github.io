@@ -48,13 +48,23 @@ menu:
       url: "https://www.linkedin.com/in/0xjb/"
       params:
         icon: linkedin
-    - name: Discord
+    - name: TryHackMe
       weight: 8
+      url: "https://tryhackme.com/p/Baphometpwn"
+      params:
+        icon: terminal
+    - name: HackTheBox
+      weight: 9
+      url: "https://profile.hackthebox.com/profile/019f0d63-d0b9-73e1-88ef-ab15f2dd6756"
+      params:
+        icon: terminal
+    - name: Discord
+      weight: 10
       url: "https://discord.gg/rDYw38Mmw"
       params:
         icon: discord
     - name: AetherGuard CTF
-      weight: 9
+      weight: 11
       url: "https://ctf.aetherguard.xyz/"
       params:
         icon: flag
