@@ -43,7 +43,7 @@ beacon> pwd
 beacon> ls C:\ProgramData\Northwind\Test
 ```
 
-Illustrative output shape:
+Example output:
 
 ```text
 Current identity: NORTHWIND\analyst01
@@ -51,7 +51,7 @@ Working directory: C:\Windows\System32
 Directory listing: marker.txt
 ```
 
-The output above is synthetic and simplified. Exact console wording varies by version and command. Confirm the user context and target before every operation. If the identity, host, path, or Beacon parent is unexpected, stop and use the engagement escalation path.
+Exact console wording varies by version and command. Confirm the user context and target before every operation. If the identity, host, path, or Beacon parent is unexpected, stop and use the engagement escalation path.
 
 ### Query a small directory set
 
@@ -61,7 +61,7 @@ When the approved objective includes Active Directory discovery, a reviewed LDAP
 beacon> ldapsearch "(objectClass=computer)" --attributes sAMAccountName,dNSHostName,operatingSystem --count 5 --hostname NW-AD-01.northwind.example --dn DC=northwind,DC=example
 ```
 
-Illustrative result shape, not a verbatim capture from a specific BOF release:
+Example output:
 
 ```text
 Search base: DC=northwind,DC=example
@@ -77,7 +77,7 @@ dNSHostName: nw-ad-01.northwind.example
 operatingSystem: Windows Server 2022
 ```
 
-The names and domain are fictional. The query returns only three selected attributes and is limited to five results. Start with the minimum set that answers the agreed question. Avoid requesting every attribute or security descriptor by default, because that increases collection volume and may include sensitive relationships.
+The query returns only three selected attributes and is limited to five results. Start with the minimum set that answers the agreed question. Avoid requesting every attribute or security descriptor by default, because that increases collection volume and may include sensitive relationships.
 
 For a user inventory, change only the LDAP filter and attribute list after confirming the exact query with the client:
 

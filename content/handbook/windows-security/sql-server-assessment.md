@@ -53,7 +53,7 @@ WHERE is_linked = 1
 ORDER BY name;
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 assessment_login              server_name           product_version
@@ -70,7 +70,7 @@ name            product        provider       data_source   is_linked
 ReportingLink   SQL Server     MSOLEDBSQL     BI-REPORT-01  1
 ```
 
-Names and addresses shown are fictional. A linked server entry describes configuration; it does not establish which remote identity is used or what that identity can access. Ask the database owner to confirm the mapping and verify permissions with a benign query against an approved test endpoint.
+Example names and reserved addresses are used. A linked server entry describes configuration; it does not establish which remote identity is used or what that identity can access. Ask the database owner to confirm the mapping and verify permissions with a benign query against an approved test endpoint.
 
 ## Validate with test data
 

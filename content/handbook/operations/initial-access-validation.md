@@ -52,7 +52,7 @@ Invoke-WebRequest -Uri 'https://awareness.northwind.example/marker' `
   Select-Object StatusCode, Headers
 ```
 
-Illustrative output:
+Example output:
 
 ```text
 StatusCode Headers
@@ -60,7 +60,7 @@ StatusCode Headers
 200        {[Content-Type, text/html; charset=utf-8], [Cache-Control, no-store]}
 ```
 
-The host and page are fictional. Confirm DNS, certificate ownership, page content, and logging behavior with the campaign owner. Do not add credential fields, collect passwords, or deliver executable content as part of this validation workflow.
+The host and page are placeholders. Confirm DNS, certificate ownership, page content, and logging behavior with the campaign owner. Do not add credential fields, collect passwords, or deliver executable content as part of this validation workflow.
 
 ## Close out the recipient data
 

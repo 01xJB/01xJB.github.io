@@ -40,7 +40,7 @@ Resolve-DnsName 'c2-test.northwind.example' -Type A
 Test-NetConnection -ComputerName 'c2-test.northwind.example' -Port 443
 ```
 
-Illustrative output:
+Example output:
 
 ```text
 Name                       Type TTL Section IPAddress
@@ -61,7 +61,7 @@ Use one row per resource. Keep provider account identifiers and renewal details 
 | Resource | Owner | Approved purpose | First and last use | Evidence location | Retirement status |
 | --- | --- | --- | --- | --- | --- |
 | `c2-test.northwind.example` | Infrastructure lead | Authorized lab callback test | Recorded in operation log | Restricted evidence store | Pending client signoff |
-| `192.0.2.80` | Infrastructure lead | Documentation example only | Not used | None | Not applicable |
+| `192.0.2.80` | Infrastructure lead | Reserved documentation address | Not used | None | Not applicable |
 
 Review the ledger at kickoff, after any infrastructure change, and during closeout. Record takedown confirmation and any remaining DNS or certificate dependencies.
 

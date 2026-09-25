@@ -53,7 +53,7 @@ Get-ADTrust -Filter * -Server $Server |
   Sort-Object Target
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 Name                 Source              Target             Direction TrustType SelectiveAuthentication

@@ -72,7 +72,7 @@ Test-AppLockerPolicy -XmlPolicy (Join-Path $EvidencePath 'effective-applocker.xm
   -User 'NORTHWIND\analyst01'
 ```
 
-Synthetic result:
+Example output:
 
 ```text
 FilePath                                      PolicyDecision MatchingRule
@@ -136,7 +136,7 @@ $Candidates.FullName |
   Select-Object FilePath, PolicyDecision, MatchingRule
 ```
 
-Synthetic results:
+Example output:
 
 ```text
 FilePath                                             PolicyDecision MatchingRule

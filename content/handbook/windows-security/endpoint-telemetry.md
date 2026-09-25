@@ -31,7 +31,7 @@ Get-WinEvent -ListLog '*Defender*' |
   Select-Object LogName, IsEnabled, RecordCount
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 AMServiceEnabled              : True
@@ -105,7 +105,7 @@ $DeviceGuard = Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' `
 }
 ```
 
-Illustrative result:
+Example output:
 
 ```text
 Hostname                    : WS-014

@@ -28,7 +28,7 @@ For each phase, specify:
 5. The expected side effects and rollback steps.
 6. The person who can stop or change the exercise.
 
-Use synthetic accounts, test files, and non production resources whenever they can demonstrate the same control. Sensitive data access, credential extraction, destructive actions, persistence, and control modification should each require separate explicit approval.
+Use test accounts, test files, and non production resources whenever they can demonstrate the same control. Sensitive data access, credential extraction, destructive actions, persistence, and control modification should each require separate explicit approval.
 
 ## Measure the response
 

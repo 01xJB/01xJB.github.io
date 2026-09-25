@@ -39,7 +39,7 @@ UTC time              Action ID  Source     Target       Result              Def
 2026-09-25T14:49:03Z  TEST-015   WS-014     APP-SRV-02   TCP check succeeded Ticket 4421, closed
 ```
 
-The sample is synthetic. Include failures and stopped actions as well as successful outcomes. A stopped action can show that the safety process worked.
+This example uses placeholders. Include failures and stopped actions as well as successful outcomes. A stopped action can show that the safety process worked.
 
 ## Inventory temporary resources
 

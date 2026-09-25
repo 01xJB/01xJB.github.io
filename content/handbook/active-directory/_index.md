@@ -6,4 +6,4 @@ sidebar:
   open: true
 ---
 
-Assessment guides for mapping identity relationships and validating common exposure paths in Active Directory. Begin with read only discovery, then validate only the paths authorized by the rules of engagement.
+Assessment guides for directory discovery, trusts, Kerberos, delegation, privileged control, and lateral access. Begin with bounded read-only inventory, then validate only the paths authorized by the rules of engagement.

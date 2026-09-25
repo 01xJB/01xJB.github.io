@@ -66,7 +66,7 @@ Get-ADUser -Server $Server -SearchBase $Base `
   Sort-Object SamAccountName
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 SamAccountName Enabled ManagedBy                         PasswordLastSet       SPNCount
@@ -207,7 +207,7 @@ Get-FileHash 'C:\Assessment\Tools\Rubeus.exe' -Algorithm SHA256
 & 'C:\Assessment\Tools\Rubeus.exe' triage
 ```
 
-Illustrative output:
+Example output:
 
 ```text
 LUID             UserName             ServiceName                         EndTime

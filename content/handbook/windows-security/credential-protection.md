@@ -42,7 +42,7 @@ $DeviceGuard | Select-Object VirtualizationBasedSecurityStatus,
   SecurityServicesConfigured, SecurityServicesRunning
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 VirtualizationBasedSecurityStatus SecurityServicesConfigured SecurityServicesRunning

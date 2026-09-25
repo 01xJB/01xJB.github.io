@@ -66,7 +66,7 @@ Get-ADObject -Server $Server -SearchBase $TemplateContainer `
     'msPKI-Certificate-Name-Flag', pKIExtendedKeyUsage
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 Name                  dNSHostName                    certificateTemplates
@@ -128,7 +128,7 @@ certipy find \
   -enabled -vulnerable -stdout
 ```
 
-Illustrative output:
+Example output:
 
 ```text
 Certificate Authorities
@@ -174,3 +174,18 @@ Do not disable a production template or alter CA policy as part of a scanner run
 Correlate the assessment window with CA issuance and template-change records. Preserve request identifiers and requester identities as evidence, then ask the CA owner to determine whether each request was expected. A configuration-only review should not produce a new privileged certificate. When no issuance test was authorized, report the exposure as a configuration finding rather than implying that certificate authentication was demonstrated.
 
 For current Certipy options, use the [upstream usage guide](https://github.com/ly4k/Certipy/wiki/05-%E2%80%90-Usage) and [command reference](https://github.com/ly4k/Certipy/wiki/08-%E2%80%90-Command-Reference). For design and remediation, use Microsoft's [certificate template guidance](https://learn.microsoft.com/en-us/windows-server/identity/ad-cs/manage-certificate-templates) and the [Certified Pre-Owned research](https://specterops.io/blog/2021/06/17/certified-pre-owned/).
+
+## Common AD CS finding patterns
+
+Use these labels to organize evidence, not as proof that an account can authenticate as a different identity:
+
+| Pattern | Evidence to confirm | First remediation check |
+| --- | --- | --- |
+| ESC1-style template | Broad enrollment, requester controls subject identity, client-authentication purpose, and approval/signature controls do not stop issuance | Remove requester-controlled identity fields or restrict enrollment; review already issued certificates |
+| ESC2-style template | Broad enrollment with an any-purpose or missing EKU configuration | Replace with purpose-specific templates and reduce enrollment rights |
+| ESC3-style enrollment agent | Agent certificate issuance rights and restrictions on whom it may represent | Limit agent enrollment and enforce enrollment-agent restrictions and approval |
+| ESC4-style template control | A low-privilege principal can write sensitive template settings or permissions | Remove unnecessary write/owner rights and audit template changes |
+| ESC8-style web enrollment exposure | Enrollment endpoint transport and NTLM protections do not meet the organization's baseline | Disable unused web enrollment and enforce supported HTTPS channel protections and NTLM relay defenses |
+| CA private-key compromise | Evidence that CA signing key material or its protected backup was exposed | Treat as PKI incident response; evaluate trust, revocation, certificate lifetime, and CA recovery with the PKI owner |
+
+Keep the review sequence simple: **find → verify publication → check effective rights → ask the owner → document or remediate → rerun the same query**. Do not use `req`, `auth`, relay, template-write, or certificate-forging commands to prove a production finding. Those actions can create reusable privileged authentication material or change certificate issuance.

@@ -27,7 +27,7 @@ Test-NetConnection 'c2-test.northwind.example' -Port 443 `
   -InformationLevel Detailed
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 Name                       Type TTL NameHost IPAddress
@@ -74,13 +74,13 @@ sudo journalctl -u nginx --since '2026-09-25 13:00:00' \
   --until '2026-09-25 13:30:00' --no-pager
 ```
 
-Synthetic record:
+Example record:
 
 ```text
 2026-09-25T13:12:04Z health-check 198.51.100.25 GET /health 200
 ```
 
-The address and record are illustrative. Do not copy raw request logs into a public writeup because they may contain client addresses, identifiers, or tokens.
+This is an example record. Do not copy raw request logs into a public writeup because they may contain client addresses, identifiers, or tokens.
 
 ## 6. Close out infrastructure
 

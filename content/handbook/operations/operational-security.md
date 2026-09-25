@@ -49,7 +49,7 @@ Before a command or tool action, answer these questions in the activity record:
 4. What will the action contact, change, or collect?
 5. What evidence will show the result, and how will the action stop?
 
-Keep a compact task record. Use a client approved ticket system or an encrypted local engagement log. The sample below is a synthetic text record and contains no customer data.
+Keep a compact task record. Use a client approved ticket system or an encrypted local engagement log. The sample below is a example text record and contains no customer data.
 
 ```text
 Action ID: TEST-014

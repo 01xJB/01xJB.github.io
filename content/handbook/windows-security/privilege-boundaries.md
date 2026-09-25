@@ -38,7 +38,7 @@ Get-CimInstance Win32_Service |
   Sort-Object Name
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 Name                    ObjectClass PrincipalSource
@@ -59,7 +59,7 @@ icacls 'C:\Program Files\Northwind\agent.exe'
 icacls 'C:\Program Files\Northwind'
 ```
 
-Illustrative output:
+Example output:
 
 ```text
 C:\Program Files\Northwind\agent.exe NORTHWIND\IT Support:(RX)

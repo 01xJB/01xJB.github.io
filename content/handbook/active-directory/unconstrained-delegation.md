@@ -15,6 +15,22 @@ Unconstrained delegation allows a service to request services on behalf of an au
 
 Record the approved domain, domain controller, search base, allowed query window, and directory account used. Start with directory metadata only. Do not collect tickets, credentials, or memory from delegated systems.
 
+With a reviewed LDAP client or the approved Beacon `ldapsearch` BOF, find computer objects with the `TRUSTED_FOR_DELEGATION` bit set. The LDAP bitwise matching rule uses the documented UAC bit value `524288`:
+
+```text
+beacon> ldapsearch "(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=524288))" --attributes sAMAccountName,dNSHostName,operatingSystem --count 50 --hostname NW-AD-01.northwind.example --dn DC=northwind,DC=example
+```
+
+Example output:
+
+```text
+sAMAccountName: FILE-SRV-03$
+dNSHostName: file-srv-03.northwind.example
+operatingSystem: Windows Server 2022
+```
+
+The filter is read-only and identifies the setting, not a successful attack path. Check service accounts as a separate query. Confirm the exact filter behavior with the directory client version deployed in the engagement.
+
 ```powershell
 $Server = 'NW-AD-01.northwind.example'
 $Base = 'DC=northwind,DC=example'
@@ -56,6 +72,10 @@ The list is a starting point. A domain controller can have delegation-related se
 For each object, ask the service owner to identify the exact application flow and dependent users. Check whether the service can move to resource-based or constrained delegation. Review whether sensitive accounts are marked as non-delegable and whether administrative logons are prohibited on the affected host.
 
 Use the machine-readable properties as evidence, not as a proof of a user-to-administrator path. Validate the destination authorization separately through ACL review and a low-impact access check with a designated test identity. Do not use a privileged account as an impersonation test identity.
+
+### Exploiting unconstrained delegation: exposure conditions
+
+The risk chain is: (1) a user authenticates to a broadly trusted service, (2) the service host retains delegated ticket material, and (3) a compromised service context exposes that material for use elsewhere. Impact depends on which users authenticate to the host, host protections, and their rights at other systems. Do not collect or replay tickets to establish the finding. The directory flag, privileged-logon exposure, endpoint configuration, and owner-confirmed business need are sufficient evidence for a configuration review.
 
 ## 3. Review exposure and monitoring
 

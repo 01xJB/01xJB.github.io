@@ -36,7 +36,7 @@ Get-ADUser -Server $Server -SearchBase $Base -Filter * `
     }}
 ```
 
-Illustrative output:
+Example output:
 
 ```text
 Name       Enabled ManagedBy                          AllowedFrontEnds
@@ -50,9 +50,15 @@ For each target, identify the resource owner and the listed front-end owner. Rev
 
 Ask whether the application still needs the relationship and whether the listed front end is the correct service identity. Validate ordinary user access to a low-impact application path without impersonating a privileged user. Configuration, control of a front-end account, and permission at the target are separate links in an access path.
 
+### Exploiting RBCD: exposure conditions
+
+An abuse path generally requires control of a principal accepted by the resource's delegation descriptor, a usable service identity, an allowed target SPN, and authorization at the back-end service. These are separate conditions. A writable delegation descriptor can create a dangerous relationship, but it does not automatically make the caller an administrator. Document each link and its owner without changing the descriptor or impersonating a privileged user.
+
 ## 3. Monitor changes
 
 Review directory service change auditing for modifications to the target computer or user object, particularly changes to the `msDS-AllowedToActOnBehalfOfOtherIdentity` security descriptor. Correlate the actor, source host, change time, ticket, and service owner. Event visibility depends on directory auditing and central collection configuration; agree on required SACLs and retention with the directory team.
+
+When Directory Service Changes auditing and the needed SACL are configured, Security Event 5136 can record directory object modifications. Confirm that the event includes the target object's distinguished name and changed attribute, and verify forwarding to the SIEM before relying on it for detection.
 
 ## 4. Remove stale principals through change control
 

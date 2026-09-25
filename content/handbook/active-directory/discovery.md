@@ -11,7 +11,7 @@ tags:
 
 Active Directory enumeration turns directory data into a scoped map of identities, systems, policy, and relationships. A good assessment does not begin by collecting every object. It begins with a question, gathers the minimum evidence needed to answer it, and verifies each important relationship against the directory or the system that enforces it.
 
-This walkthrough uses the fictional domain `northwind.example`. All names and output are synthetic. The examples are read only directory queries intended for an authorized lab or an engagement whose rules of engagement permit this collection. Replace the sample domain controller, search base, and output path with values approved for the environment.
+This walkthrough uses the sample domain `northwind.example`. The commands are read only directory queries intended for an authorized lab or engagement. Replace the domain controller, search base, and output path with values approved for the environment.
 
 > [!IMPORTANT]
 > Confirm the authorized domain, account, collection methods, rate limits, evidence location, and stop conditions before running queries. Directory reads can still generate security telemetry and expose sensitive organizational relationships.
@@ -56,7 +56,7 @@ Get-ADRootDSE -Server $Server |
   Select-Object defaultNamingContext, configurationNamingContext, dnsHostName
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 Name            Version Path
@@ -85,7 +85,7 @@ Get-ADDomainController -Filter * -Server $Server |
   Select-Object HostName, Site, IsGlobalCatalog, OperatingSystem
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 DNSRoot     : northwind.example
@@ -119,7 +119,7 @@ Get-ADUser -Server $Server `
 "Enabled user records returned: $($UserInventory.Count)"
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 SamAccountName Department     Title                 LastLogonDate        SPNCount
@@ -156,7 +156,7 @@ ldapsearch -LLL -x \
   sAMAccountName department
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 dn: CN=Analyst 01,OU=Users,DC=northwind,DC=example
@@ -185,7 +185,7 @@ Get-ADGroupMember -Identity $PrivilegedGroup -Server $Server |
   Sort-Object ObjectClass, SamAccountName
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 Name             SamAccountName ObjectClass SID
@@ -200,7 +200,7 @@ Get-ADGroupMember -Identity 'id-platform' -Server $Server |
   Select-Object Name, SamAccountName, ObjectClass, SID
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 Name       SamAccountName ObjectClass SID
@@ -230,7 +230,7 @@ Get-ADComputer -Server $Server -SearchBase $SearchBase `
   Sort-Object OperatingSystem, Name
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 Name        DNSHostName                    OperatingSystem       OperatingSystemVersion
@@ -298,6 +298,48 @@ Get-ADComputer -Server $Server -SearchBase $SearchBase -Filter * `
 
 If a property is not returned, confirm that the attribute is valid for that object class and query the designated controller. Do not silently treat an empty result as proof that no delegation exists.
 
+## Beacon LDAP quick run
+
+When a Beacon is already authorized for directory discovery, the reviewed TrustedSec `ldapsearch` BOF can query a small set of attributes without switching to a PowerShell workflow. Confirm the BOF's source and version, use the approved domain controller and base DN, and set a result limit for each query.
+
+```text
+beacon> ldapsearch "(&(objectCategory=person)(objectClass=user))" --attributes sAMAccountName,department,memberOf --count 20 --hostname NW-AD-01.northwind.example --dn DC=northwind,DC=example
+```
+
+Example output:
+
+```text
+Entries returned: 2
+sAMAccountName: analyst01
+department: Security Operations
+memberOf: CN=Assessment Readers,OU=Groups,DC=northwind,DC=example
+
+sAMAccountName: svc_app01
+department: Platform Services
+memberOf: CN=Application Operators,OU=Groups,DC=northwind,DC=example
+```
+
+Query computers and service identities separately so the result is easy to validate:
+
+```text
+beacon> ldapsearch "(&(objectCategory=computer)(operatingSystem=Windows Server*))" --attributes sAMAccountName,dNSHostName,operatingSystem --count 20 --hostname NW-AD-01.northwind.example --dn DC=northwind,DC=example
+beacon> ldapsearch "(&(objectCategory=person)(objectClass=user)(servicePrincipalName=*))" --attributes sAMAccountName,servicePrincipalName --count 20 --hostname NW-AD-01.northwind.example --dn DC=northwind,DC=example
+beacon> ldapsearch "(&(objectCategory=group)(cn=Domain Admins))" --attributes cn,member --count 5 --hostname NW-AD-01.northwind.example --dn DC=northwind,DC=example
+```
+
+Sample result shape:
+
+```text
+sAMAccountName: APP-SRV-02$
+dNSHostName: app-srv-02.northwind.example
+operatingSystem: Windows Server 2022
+
+sAMAccountName: svc_app01
+servicePrincipalName: HTTP/app-srv-02.northwind.example
+```
+
+Use group membership results to identify the next object to review, then query that object explicitly. Do not turn a directory inventory into a password, ticket, session, or remote-execution sweep.
+
 ## 8. Use PowerView for focused LDAP review
 
 PowerView is part of PowerSploit, whose upstream repository is archived. Treat it as a legacy assessment tool. Use only a reviewed, version controlled copy that the engagement permits. Do not fetch and execute a script directly from a network URL, and do not use obfuscated or modified variants to avoid security controls.
@@ -352,7 +394,7 @@ Get-DomainGroupMember -Identity 'Domain Admins' -Domain $Domain |
   Select-Object GroupName, MemberName, MemberObjectClass, MemberSID
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 Name              Forest             DomainControllers
@@ -376,7 +418,7 @@ Get-DomainGroupMember -Identity 'id-platform' -Domain $Domain |
   Select-Object GroupName, MemberName, MemberObjectClass, MemberSID
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 GroupName      MemberName   MemberObjectClass
@@ -399,7 +441,7 @@ Get-DomainObjectAcl -Identity $GroupDN -Domain $Domain -ResolveGUIDs |
     ObjectAceType, IsInherited
 ```
 
-Synthetic output:
+Example output:
 
 ```text
 SecurityIdentifier                                      ActiveDirectoryRights ObjectAceType IsInherited
