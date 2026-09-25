@@ -200,23 +200,27 @@ klist
 klist sessions
 ```
 
-If Rubeus is specifically approved and present on the assessment workstation, its `triage` command can summarize tickets visible to the current context. Use the reviewed binary from the engagement tool store and save its SHA-256 with the evidence:
+If Rubeus is specifically approved and present on the assessment workstation, its `triage` command lists ticket metadata visible to the current logon session. Use the reviewed binary from the engagement tool store, run it without elevation, and save its SHA-256 with the evidence:
 
 ```powershell
 Get-FileHash 'C:\Assessment\Tools\Rubeus.exe' -Algorithm SHA256
 & 'C:\Assessment\Tools\Rubeus.exe' triage
 ```
 
-Example output:
+Example output (Rubeus versions format the banner and spacing differently):
 
 ```text
-LUID             UserName             ServiceName                         EndTime
-----             --------             -----------                         -------
-0x00000000002f5a21 NORTHWIND\analyst01 krbtgt/NORTHWIND.EXAMPLE            9/25/2026 6:45:00 PM
-0x00000000002f5a21 NORTHWIND\analyst01 cifs/FILE-SRV-03.northwind.example  9/25/2026 6:45:00 PM
+[*] Action: Triage Kerberos Tickets (Current User)
+[*] Current LUID    : 0x2f5a21
+-----------------------------------------------------------------------------------------
+| LUID       | UserName                    | Service                                  | EndTime               |
+-----------------------------------------------------------------------------------------
+| 0x2f5a21   | analyst02 @ NORTHWIND.EXAMPLE | krbtgt/NORTHWIND.EXAMPLE                | 9/25/2026 6:45:00 PM  |
+| 0x2f5a21   | analyst02 @ NORTHWIND.EXAMPLE | cifs/fs-01.northwind.example            | 9/25/2026 6:45:00 PM  |
+-----------------------------------------------------------------------------------------
 ```
 
-Use the result only to establish which tickets are present in the assessment user's own session. Do not export, inject, renew, request, crack, or impersonate with ticket material. Record the logon context, timestamp, tool hash, and the minimum metadata needed to explain the finding. If Rubeus is not explicitly approved, rely on `klist` and DC event records instead.
+`LUID` identifies the logon session; `UserName` identifies its owner; `Service` names the ticket target; `EndTime` is its expiry. Compare the rows with `klist` in the same user session. Running elevated can expose other users' sessions, so do not use elevation for this inventory. This command lists metadata; do not export, inject, renew, request, crack, or impersonate with ticket material. Record the logon context, timestamp, tool hash, and only the metadata needed to explain the finding. If Rubeus is not explicitly approved, use `klist` and domain-controller event records instead.
 
 ## Remediate with the identity owner
 
@@ -226,4 +230,4 @@ Changes should be made by the directory owner through the normal change process.
 
 After an approved change, rerun the same bounded inventory and compare before/after results. Check Kerberos service-ticket activity on domain controllers, including Security Event 4769 where the required auditing is enabled. Baseline the source host, client, service name, encryption type, and request pattern before classifying an event as unusual.
 
-For protocol details, see Microsoft's [Kerberos constrained delegation overview](https://learn.microsoft.com/en-us/windows-server/security/kerberos/kerberos-constrained-delegation-overview), [delegation security guidance](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/implementing-least-privilege-administrative-models), and the [Rubeus project documentation](https://github.com/GhostPack/Rubeus/blob/master/README.md).
+For protocol details, see Microsoft's [Kerberos constrained delegation overview](https://learn.microsoft.com/en-us/windows-server/security/kerberos/kerberos-constrained-delegation-overview), [delegation security guidance](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/implementing-least-privilege-administrative-models), and the [Rubeus triage documentation](https://github.com/GhostPack/Rubeus#triage).
