@@ -79,3 +79,110 @@ Correlate process, identity, network, and directory events. Maintain a baseline 
 
 - [Microsoft Learn: Advanced credential protection](https://learn.microsoft.com/en-us/windows/security/book/identity-protection-advanced-credential-protection)
 - [Microsoft Learn: Audit Directory Service Access event 4662](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4662)
+
+## Build a host telemetry baseline
+
+Before evaluating an alert or an approved simulation, establish what the endpoint is configured to record. The following inventory uses built-in Windows facilities and reads configuration only. Run it on the named representative endpoint; do not collect process memory, credential material, or unrelated user data.
+
+### 1. Record endpoint identity and protection state
+
+```powershell
+$Computer = Get-CimInstance Win32_ComputerSystem
+$OS = Get-CimInstance Win32_OperatingSystem
+$Defender = Get-MpComputerStatus -ErrorAction SilentlyContinue
+$DeviceGuard = Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' `
+  -ClassName Win32_DeviceGuard -ErrorAction SilentlyContinue
+
+[pscustomobject]@{
+  Hostname = $Computer.Name
+  Domain = $Computer.Domain
+  OperatingSystem = $OS.Caption
+  Build = $OS.BuildNumber
+  DefenderRealtime = $Defender.RealTimeProtectionEnabled
+  VBSStatus = $DeviceGuard.VirtualizationBasedSecurityStatus
+  SecurityServicesConfigured = ($DeviceGuard.SecurityServicesConfigured -join ',')
+  SecurityServicesRunning = ($DeviceGuard.SecurityServicesRunning -join ',')
+}
+```
+
+Illustrative result:
+
+```text
+Hostname                    : WS-014
+Domain                      : northwind.example
+OperatingSystem             : Microsoft Windows 11 Enterprise
+Build                       : 26100
+DefenderRealtime            : True
+VBSStatus                   : 2
+SecurityServicesConfigured  : 1,2
+SecurityServicesRunning     : 1
+```
+
+These values are configuration evidence, not a verdict. Map numeric Device Guard values against Microsoft's current documentation and the endpoint's intended baseline. A capability can be configured but not running because of hardware, policy, or startup constraints.
+
+### 2. Check event sources and retention
+
+```powershell
+$Patterns = @('*PowerShell*', '*AppLocker*', '*CodeIntegrity*', '*Windows Defender*')
+
+foreach ($Pattern in $Patterns) {
+  Get-WinEvent -ListLog $Pattern -ErrorAction SilentlyContinue |
+    Select-Object LogName, IsEnabled, RecordCount, MaximumSizeInBytes,
+      LastWriteTime
+}
+```
+
+Do not assume that collection is enabled because a channel exists. Confirm audit policy, channel state, forwarding status, retention, and access controls with the logging team. Export only the agreed time range and channels.
+
+### 3. Review a bounded time range
+
+For a controlled validation window, filter on a small period and a known test endpoint. Security Event 4688 records process creation when the relevant audit subcategory is configured. PowerShell Operational Event 4104 can record script block content when the associated logging policy is enabled. Availability, detail, and retention depend on host policy.
+
+```powershell
+$Start = Get-Date '2026-09-25 13:00:00'
+$End = Get-Date '2026-09-25 13:30:00'
+
+Get-WinEvent -FilterHashtable @{
+  LogName = 'Security'
+  Id = 4688
+  StartTime = $Start
+  EndTime = $End
+} -ErrorAction SilentlyContinue |
+  Select-Object TimeCreated, Id, MachineName, Message
+
+Get-WinEvent -FilterHashtable @{
+  LogName = 'Microsoft-Windows-PowerShell/Operational'
+  Id = 4104
+  StartTime = $Start
+  EndTime = $End
+} -ErrorAction SilentlyContinue |
+  Select-Object TimeCreated, Id, MachineName, Message
+```
+
+Review event data under the client's handling policy. Command lines and script blocks can contain tokens, paths, or personal data. Redact sensitive values before attaching results to a report, and never publish raw event records from a client environment.
+
+### 4. Compare expected and observed signals
+
+For each approved benign simulation, record its time, endpoint, initiating test account, expected telemetry source, observed event identifiers, and forwarding delay. If an event is absent, check whether audit policy was active, the channel was enabled, the log rolled over, and the collector received it. Do not conclude that a control was bypassed from one missing event.
+
+### 5. Map telemetry gaps to owners
+
+Prioritize process creation, authentication, application control, endpoint protection, and identity changes according to the organization's threat model. Assign each missing signal to the team that owns its generation or forwarding. Validate tuning with an approved benign test before changing production audit policy.
+
+For platform semantics, review Microsoft's [Windows audit policy guidance](https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/basic-audit-policy-recommendations), [App Control event explanations](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/operations/event-id-explanations), and [Device Guard WMI class reference](https://learn.microsoft.com/en-us/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity).
+
+## Map endpoint assessment topics to defensive evidence
+
+Several techniques studied in adversary emulation are most usefully assessed by verifying whether the corresponding control and signal exist, whether they reach the monitoring team, and whether an approved benign test is recognized. This matrix describes review targets without providing code or instructions for bypassing those controls.
+
+| Area | Evidence to review | Safe validation question |
+| --- | --- | --- |
+| Application or image load | App Control policy, signer and hash records, Code Integrity channel | Does the approved test binary produce the expected allow, audit, or block result? |
+| Script execution | PowerShell Operational channel, script-block logging policy, endpoint alert records | Does the approved marker create the expected event and alert? |
+| Runtime monitoring | EDR sensor health, alert pipeline status, documented policy mode | Does an owner-approved benign simulation appear in the endpoint and central console? |
+| Service and task changes | System/service audit, Security log, scheduled task inventory | Are approved changes attributable to an identity and correlated to the change record? |
+| User context | Security logon events, group membership, token privileges reported by the owner | Can the assessor distinguish the test identity from the service or administrator context? |
+| Credential protections | Credential Guard/VBS configuration, LSA policy, Defender health | Are the documented protections running on the systems where privileged logons occur? |
+| Network activity | Firewall, DNS, VPN, proxy, and endpoint network telemetry | Can the SOC identify the source, destination, protocol, time, and responsible test identity? |
+
+If the control is present but its data source is missing centrally, record a visibility gap with the source owner and collector owner. If the benign action is blocked but no alert reaches an analyst, report prevention and response separately. Do not intentionally disable the sensor, alter kernel monitoring, or manipulate process memory to create a blind spot.

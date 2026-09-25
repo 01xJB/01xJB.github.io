@@ -91,3 +91,91 @@ Prefer narrowly defined signer and managed installer rules over broad writable p
 - [Microsoft Learn: App Control for Business](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/)
 - [Microsoft Learn: AppLocker](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/applocker/)
 - [Microsoft Learn: Test-AppLockerPolicy](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/applocker/test-an-applocker-policy-by-using-test-applockerpolicy)
+
+## AppLocker audit from policy to event
+
+Use this sequence on one approved endpoint first. AppLocker policy cmdlets report Group Policy policy; environments that deliver application control through another management channel require the corresponding management view as well. Record the host, user, policy collection, and collection enforcement mode before interpreting a test result.
+
+### 1. Capture the effective policy
+
+```powershell
+$EvidencePath = 'C:\Assessment\Evidence'
+$PolicyFile = Join-Path $EvidencePath 'effective-applocker.xml'
+New-Item -Path $EvidencePath -ItemType Directory -Force | Out-Null
+
+Get-AppLockerPolicy -Effective -Xml |
+  Set-Content -LiteralPath $PolicyFile -Encoding utf8
+
+[xml]$PolicyXml = Get-Content -LiteralPath $PolicyFile -Raw
+$PolicyXml.AppLockerPolicy.RuleCollection |
+  Select-Object Type, EnforcementMode,
+    @{Name='Rules'; Expression={ @($_.FilePathRule + $_.FilePublisherRule + $_.FileHashRule).Count }}
+```
+
+Example output:
+
+```text
+Type       EnforcementMode Rules
+----       --------------- -----
+Exe        Enabled            18
+Msi        AuditOnly            4
+Script     Enabled             9
+Dll        NotConfigured        0
+```
+
+Read the XML rules and their exceptions. For each broad path rule, confirm both the path ACL and which identities can write files there. A rule granting execution from a location does not establish exploitability unless the assessed principal can write a file that the policy will trust.
+
+### 2. Evaluate approved files without launching them
+
+Use a known benign vendor application and an explicitly approved test identity. `Test-AppLockerPolicy` predicts the policy decision for the supplied file; it does not execute it.
+
+```powershell
+$Candidates = Get-ChildItem 'C:\Program Files\Northwind Tools' -Filter '*.exe' -File -Recurse
+$Candidates.FullName |
+  Test-AppLockerPolicy -XmlPolicy $PolicyFile -User 'NORTHWIND\analyst01' |
+  Select-Object FilePath, PolicyDecision, MatchingRule
+```
+
+Synthetic results:
+
+```text
+FilePath                                             PolicyDecision MatchingRule
+--------                                             -------------- ------------
+C:\Program Files\Northwind Tools\viewer.exe        Allowed        Publisher rule 4
+C:\Program Files\Northwind Tools\helper.exe        Denied         No matching allow rule
+```
+
+Record the AppLocker collection, matching rule, signer or hash, and user context. If the command returns no records, verify that the XML file contains rules, that the path exists, and that the selected policy is the policy applied to the endpoint.
+
+### 3. Correlate policy decisions with Windows events
+
+AppLocker events are stored in separate channels for executables and DLLs, scripts and Windows Installer, and packaged apps. Start with the first two channels and inspect the event message, not just its ID:
+
+```powershell
+$Since = (Get-Date).AddDays(-2)
+$Channels = @(
+  'Microsoft-Windows-AppLocker/EXE and DLL',
+  'Microsoft-Windows-AppLocker/MSI and Script'
+)
+
+foreach ($Channel in $Channels) {
+  Get-WinEvent -FilterHashtable @{
+    LogName   = $Channel
+    StartTime = $Since
+    Id        = 8000, 8001, 8002, 8003, 8004, 8005, 8006, 8007
+  } -ErrorAction SilentlyContinue |
+    Select-Object TimeCreated, Id, MachineName, Message
+}
+```
+
+Common event meanings include policy application failure (8000), successful application (8001), allowed execution (8002/8005), audit-only would-block (8003/8006), and enforced block (8004/8007). Confirm channel and message text because the event set varies by collection. An empty query can mean no matching activity, a disabled channel, a collection mismatch, or an expired log window.
+
+### 4. Report the control outcome
+
+For each test case, retain the exported policy hash, machine and user context, file signer and hash, `Test-AppLockerPolicy` result, and correlated event. A policy in `AuditOnly` mode records would-block events but does not enforce the block. Report that distinction plainly. Run any live allow/deny test only with an owner-approved benign file and rollback plan.
+
+### 5. Correct the policy in a controlled change
+
+Remove unused rules, narrow writeable path exceptions, and prefer publisher rules tied to trusted publishers and product metadata when that fits the application. Stage changes in audit mode, review would-block events with the application owner, then enforce through normal change control. Keep a recovery plan for essential administration tools and validate policy application on a representative endpoint after the change.
+
+Microsoft's [AppLocker event reference](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/applocker/using-event-viewer-with-applocker) describes channel-specific events and their meanings. Microsoft's [Test-AppLockerPolicy instructions](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/applocker/test-an-applocker-policy-by-using-test-applockerpolicy) cover offline policy evaluation.
