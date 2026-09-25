@@ -1,6 +1,6 @@
 ---
 title: "Safe Initial Access Validation"
-date: 2026-09-24
+date: 2026-09-25
 weight: 4
 type: docs
 tags:
@@ -32,3 +32,36 @@ Pause if the campaign reaches an unapproved recipient, causes unexpected busines
 ## Improve the control chain
 
 Use results to improve reporting workflows, mail filtering, domain protections, endpoint coverage, and response playbooks. Provide aggregate metrics and actionable observations to the client. Retire test domains and remove temporary content after the agreed period.
+
+## Run the exercise in stages
+
+Use a small, pre approved recipient set and a client controlled test domain. Keep a copy of the approved message and landing page in the engagement record. Before delivery, confirm the campaign window, help desk notice, emergency contact, and stop authority.
+
+1. Send a validation message only to the designated internal test mailbox.
+2. Confirm that the message is delivered, quarantined, or rejected as expected.
+3. Verify that the harmless landing page displays the approved content and records only a non sensitive event.
+4. Ask the client to confirm the corresponding mail, proxy, identity, and endpoint telemetry.
+5. Expand to the approved recipient cohort only after the test mailbox check succeeds.
+6. End the campaign at the agreed time and reconcile delivery and reporting metrics.
+
+Check that the owned landing page is reachable before the test window. This request uses a header check and does not submit credentials or follow a user action.
+
+```powershell
+Invoke-WebRequest -Uri 'https://awareness.northwind.example/marker' `
+  -Method Head -MaximumRedirection 0 |
+  Select-Object StatusCode, Headers
+```
+
+Illustrative output:
+
+```text
+StatusCode Headers
+---------- -------
+200        {[Content-Type, text/html; charset=utf-8], [Cache-Control, no-store]}
+```
+
+The host and page are fictional. Confirm DNS, certificate ownership, page content, and logging behavior with the campaign owner. Do not add credential fields, collect passwords, or deliver executable content as part of this validation workflow.
+
+## Close out the recipient data
+
+Keep campaign metrics aggregated. Restrict access to recipient level records and delete those records at the end of the approved retention period. Report mail delivery, user reporting, analyst response, and control improvements without publishing employee names or shaming individuals.

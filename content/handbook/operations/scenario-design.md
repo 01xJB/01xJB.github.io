@@ -1,6 +1,6 @@
 ---
 title: "Designing Safe Adversary Emulation Scenarios"
-date: 2026-09-24
+date: 2026-09-25
 weight: 3
 type: docs
 tags:
@@ -37,6 +37,39 @@ Agree what the defenders know before the scenario begins. A collaborative exerci
 ## Close the loop
 
 At the end, reconcile operator records with defender records. Share the planned scenario, actual deviations, and any indicators that remain active. Turn each observation into an improvement that has an owner and a practical verification step.
+
+## Build a scenario card
+
+Write one compact card for every planned stage. This lets the operator, controller, and defender understand what is being tested and when to stop.
+
+| Field | Example |
+| --- | --- |
+| Objective | Verify that directory discovery from a standard workstation is monitored |
+| Test identity | Approved non privileged account |
+| Source and target | `WS-014` to `NW-AD-01.northwind.example` |
+| Action | Query a small list of computer names and operating systems |
+| Expected result | Three in scope records returned |
+| Expected telemetry | LDAP client activity and domain controller audit data where configured |
+| Stop condition | Any out of scope object or unexpected service impact |
+| Evidence | Query record, time, account, result count, defender event reference |
+| Recovery | End the query, preserve minimum evidence, notify engagement lead |
+
+Keep the action sequence explicit. Each step should have a preceding authorization check and a following result check. If a prerequisite fails, the next step should be to pause or use a pre approved alternative, not to improvise a higher impact technique.
+
+## Score outcomes consistently
+
+Use the same labels throughout the exercise:
+
+| Outcome | Meaning |
+| --- | --- |
+| Prevented | The control blocked the approved action before its intended effect |
+| Detected | Telemetry or alert identified the activity |
+| Triaged | An analyst reviewed and classified the event |
+| Contained | The response reduced further activity within the agreed objective |
+| Not observed | No evidence was available to the team by the agreed review time |
+| Not tested | The action was outside scope or stopped for safety |
+
+Record evidence for each label. “Not observed” does not mean that no telemetry exists; it may mean that the team did not receive or retain it. Use that distinction in the final report.
 
 ## Further reading
 

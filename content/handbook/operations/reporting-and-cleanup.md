@@ -1,6 +1,6 @@
 ---
 title: "Red Team Reporting and Cleanup"
-date: 2026-09-24
+date: 2026-09-25
 weight: 2
 type: docs
 tags:
@@ -28,3 +28,26 @@ Compare the red team timeline with alerts, tickets, and response actions. Record
 Before the engagement ends, review every temporary account, group change, file, service, task, certificate, firewall rule, proxy, cloud resource, and test domain. Restore approved settings, remove temporary access, revoke test certificates where appropriate, and ask system owners to verify cleanup. Document anything that could not be removed and assign it to a named owner.
 
 Finally, transfer the agreed indicators, logs, and evidence securely. Confirm retention and deletion dates with the client, then remove working copies according to the engagement plan.
+
+## Reconcile the activity log
+
+Normalize the timeline without overwriting source records. Preserve the original time zone, identify clock offsets, and associate each test action with the relevant alert, ticket, or system event.
+
+```text
+UTC time              Action ID  Source     Target       Result              Defender reference
+2026-09-25T14:42:16Z  TEST-014   WS-014     NW-AD-01         3 LDAP records      Alert 8812, reviewed
+2026-09-25T14:49:03Z  TEST-015   WS-014     APP-SRV-02   TCP check succeeded Ticket 4421, closed
+```
+
+The sample is synthetic. Include failures and stopped actions as well as successful outcomes. A stopped action can show that the safety process worked.
+
+## Inventory temporary resources
+
+At closeout, reconcile the resource list with the people who own each system. This read only example inventories files in the dedicated evidence staging folder before they are transferred or deleted under the client’s retention plan.
+
+```powershell
+Get-ChildItem 'C:\Assessment\Evidence\Staging' -File -Recurse |
+  Select-Object FullName, Length, LastWriteTime
+```
+
+For every resource, record its owner, state, cleanup method, completion time, and verification contact. Include temporary accounts, files, services, tasks, certificates, DNS records, infrastructure, and access grants only when they were actually used. Do not claim cleanup based solely on the operator’s command output; request owner confirmation for changes that affect production.

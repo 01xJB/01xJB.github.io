@@ -1,6 +1,6 @@
 ---
 title: "Credential Protection and Windows Identity Boundaries"
-date: 2026-09-24
+date: 2026-09-25
 weight: 2
 type: docs
 tags:
@@ -28,6 +28,39 @@ In many engagements, a safer proof is available. Demonstrate that a test account
 Limit privileged logons to managed administrative workstations. Use unique local administrator credentials, managed service identities, and tiered administration. Restrict rights that allow directory replication to domain controllers and the small set of approved principals that require them. Review unusual access to credential stores and replication interfaces in context with source system and account behavior.
 
 Credential Guard and similar protections reduce some forms of credential exposure, but they do not replace least privilege, endpoint monitoring, or careful control of privileged sessions. Record which control prevented or detected the test and where visibility was missing.
+
+## Verify Credential Guard state
+
+Use the documented Windows Device Guard provider to distinguish whether virtualization based security is configured from whether its services are running. Run this on one approved endpoint and record its operating system build because available properties vary by release.
+
+```powershell
+$DeviceGuard = Get-CimInstance `
+  -ClassName Win32_DeviceGuard `
+  -Namespace root\Microsoft\Windows\DeviceGuard
+
+$DeviceGuard | Select-Object VirtualizationBasedSecurityStatus,
+  SecurityServicesConfigured, SecurityServicesRunning
+```
+
+Synthetic output:
+
+```text
+VirtualizationBasedSecurityStatus SecurityServicesConfigured SecurityServicesRunning
+--------------------------------- -------------------------- -----------------------
+2                                 {1, 2}                     {1, 2}
+```
+
+Interpret the documented numeric values for the Windows version in scope. A running service value is useful evidence, but it does not establish that every credential exposure path is protected. Correlate with the device’s policy, hardware prerequisites, privileged logon practices, and endpoint telemetry.
+
+Capture the test identity and host context without collecting secrets:
+
+```powershell
+whoami
+whoami /groups
+Get-ComputerInfo | Select-Object CsName, WindowsProductName, WindowsVersion, OsBuildNumber
+```
+
+Do not run credential extraction commands as a validation shortcut. If a client requires an invasive test, define the identity, evidence limits, storage controls, recovery plan, and named approval separately before the engagement.
 
 ## Further reading
 

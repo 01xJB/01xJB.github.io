@@ -1,6 +1,6 @@
 ---
 title: "Assessing Active Directory Certificate Services"
-date: 2026-09-24
+date: 2026-09-25
 weight: 3
 type: docs
 tags:
@@ -42,6 +42,64 @@ When responding to suspected CA key compromise, revoking one issued certificate 
 ## Reporting the result
 
 Describe the template or CA setting, the affected principals, the shortest demonstrated path, and the potential business impact. Include the evidence that establishes scope and effective permissions. State clearly whether the assessment demonstrated issuance, authenticated access, or only a configuration risk.
+
+## Read only inventory with the Active Directory module
+
+Begin with the configuration naming context, then query the enterprise CA and certificate template containers. This keeps the search anchored to the directory partition that stores the public key infrastructure configuration.
+
+```powershell
+$Server = 'NW-AD-01.northwind.example'
+$Root = (Get-ADRootDSE -Server $Server).configurationNamingContext
+$CAContainer = "CN=Enrollment Services,CN=Public Key Services,CN=Services,$Root"
+$TemplateContainer = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$Root"
+
+Get-ADObject -Server $Server -SearchBase $CAContainer `
+  -LDAPFilter '(objectClass=pKIEnrollmentService)' `
+  -Properties dNSHostName, certificateTemplates |
+  Select-Object Name, dNSHostName, certificateTemplates
+
+Get-ADObject -Server $Server -SearchBase $TemplateContainer `
+  -LDAPFilter '(objectClass=pKICertificateTemplate)' `
+  -Properties displayName, 'msPKI-Enrollment-Flag',
+    'msPKI-Certificate-Name-Flag', pKIExtendedKeyUsage |
+  Select-Object Name, displayName, 'msPKI-Enrollment-Flag',
+    'msPKI-Certificate-Name-Flag', pKIExtendedKeyUsage
+```
+
+Synthetic output:
+
+```text
+Name                  dNSHostName                    certificateTemplates
+----                  -----------                    --------------------
+Northwind Issuing CA  nw-pki-01.northwind.example        {User, Workstation, NorthwindVPN}
+
+Name         displayName       msPKI-Enrollment-Flag msPKI-Certificate-Name-Flag pKIExtendedKeyUsage
+----         -----------       --------------------- --------------------------- -------------------
+NorthwindVPN Northwind VPN     0                     1                           {1.3.6.1.5.5.7.3.2}
+Workstation  Workstation Auth  0                     0                           {1.3.6.1.5.5.7.3.2}
+```
+
+The numbers are raw bit fields, not a finding on their own. Decode each flag using the current Microsoft schema documentation or a maintained assessment tool, then verify the effective template ACL and whether the CA actually publishes the template. Record the CA and template names, object identifiers, relevant permissions, and evidence source.
+
+## Confirm publication and ownership
+
+Compare the template list on each CA object with the template objects in the directory. A template may exist but not be issued by a particular CA. Confirm the business owner, intended enrollment population, required approval, certificate purpose, and renewal path with the PKI team.
+
+```powershell
+$CAs = Get-ADObject -Server $Server -SearchBase $CAContainer `
+  -LDAPFilter '(objectClass=pKIEnrollmentService)' `
+  -Properties dNSHostName, certificateTemplates
+
+foreach ($CA in $CAs) {
+  [pscustomobject]@{
+    CAName = $CA.Name
+    Host = $CA.dNSHostName
+    PublishedTemplates = ($CA.certificateTemplates -join ', ')
+  }
+}
+```
+
+This query reads directory metadata. It does not request a certificate or prove that a principal can enroll. Keep those assessment questions separate, and do not test issuance as a privileged identity without specific written approval.
 
 ## Further reading
 

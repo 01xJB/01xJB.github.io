@@ -1,6 +1,6 @@
 ---
 title: "Windows Privilege Boundary Assessment"
-date: 2026-09-24
+date: 2026-09-25
 weight: 3
 type: docs
 tags:
@@ -23,6 +23,52 @@ Record the user, group memberships, integrity level, host role, and approved tes
 | User rights | Assigned privileges and the business reason for granting them. |
 | Scheduled tasks | Principal, trigger, executable, and write access to referenced files. |
 | Database services | Service account, linked system relationships, and effective database role. |
+
+Begin with a host and identity baseline. These commands are local inventory and do not change permissions.
+
+```powershell
+whoami /all
+
+Get-LocalGroupMember -Group 'Administrators' |
+  Select-Object Name, ObjectClass, PrincipalSource
+
+Get-CimInstance Win32_Service |
+  Where-Object StartName -Match 'LocalSystem|LocalService|NetworkService' |
+  Select-Object Name, StartName, State, StartMode, PathName |
+  Sort-Object Name
+```
+
+Synthetic output:
+
+```text
+Name                    ObjectClass PrincipalSource
+----                    ----------- ---------------
+NORTHWIND\IT Support   Group       ActiveDirectory
+BUILTIN\Administrator User        Local
+
+Name             StartName             State   StartMode PathName
+----             ---------             -----   --------- --------
+InventoryAgent   LocalSystem                Running Auto C:\Program Files\Northwind\agent.exe
+Spooler          NT AUTHORITY\LocalService  Running Auto C:\Windows\System32\spoolsv.exe
+```
+
+Treat service names and paths as leads. To assess a specific path, inspect the file and directory access control lists and compare them with the identity that can modify them. Do not change the ACL or replace a service binary during a routine review.
+
+```powershell
+icacls 'C:\Program Files\Northwind\agent.exe'
+icacls 'C:\Program Files\Northwind'
+```
+
+Illustrative output:
+
+```text
+C:\Program Files\Northwind\agent.exe NORTHWIND\IT Support:(RX)
+                                      BUILTIN\Administrators:(F)
+                                      NT AUTHORITY\SYSTEM:(F)
+Successfully processed 1 files; Failed processing 0 files
+```
+
+Save the output for the selected service and identify the exact principal and permission that matter. Broad recursive scans of a production disk are noisy and rarely necessary to validate one candidate.
 
 ## Prove impact without changing production
 

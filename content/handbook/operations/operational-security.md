@@ -1,6 +1,6 @@
 ---
 title: "Operational Security for Red Team Engagements"
-date: 2026-09-24
+date: 2026-09-25
 weight: 1
 type: docs
 tags:
@@ -38,3 +38,43 @@ When an action may create a meaningful indicator, record what the action is expe
 ## Protect information
 
 Collect the least sensitive evidence that supports the finding. Prefer a screenshot, test marker, or access check over downloading real records. Encrypt logs and evidence, restrict access to the engagement team, avoid placing client data in personal accounts, and follow the agreed deletion schedule.
+
+## Use a repeatable pre task check
+
+Before a command or tool action, answer these questions in the activity record:
+
+1. Is the target explicitly in scope at this time?
+2. Which identity and source system will perform the action?
+3. Is this a read, a write, an authentication attempt, or a remote execution step?
+4. What will the action contact, change, or collect?
+5. What evidence will show the result, and how will the action stop?
+
+Keep a compact task record. Use a client approved ticket system or an encrypted local engagement log. The sample below is a synthetic text record and contains no customer data.
+
+```text
+Action ID: TEST-014
+UTC time: 2026-09-25T14:42:16Z
+Operator: analyst01
+Source: WS-014
+Target: NW-AD-01.northwind.example
+Action: Bounded LDAP query for computer name and operating system
+Purpose: Confirm asset inventory coverage
+Expected changes: None
+Observed result: 3 records returned
+Evidence: EV-014 in restricted evidence store
+Stop condition: Any out of scope result or unexpected query volume
+```
+
+If a real incident, sensitive record, or scope mismatch appears, pause the action, preserve only the minimum facts needed to explain the stop, and notify the designated contact. Do not continue to gather evidence just because a tool can do so.
+
+## Validate tool provenance
+
+Before introducing a collector, script, or Beacon Object File, record its source, version, hash, operator, approval, and intended behavior. Compare the hash with the value obtained through your team’s approved distribution process.
+
+```powershell
+Get-FileHash -Algorithm SHA256 `
+  -Path 'C:\Assessment\Tools\approved-collector.exe' |
+  Select-Object Path, Algorithm, Hash
+```
+
+Hash verification confirms file identity against a trusted reference; it does not prove that the software is safe or suitable. Review the source and behavior, then confirm its use is authorized for the target environment.

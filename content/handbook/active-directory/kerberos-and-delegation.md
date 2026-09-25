@@ -1,6 +1,6 @@
 ---
 title: "Kerberos and Delegation Risk Assessment"
-date: 2026-09-24
+date: 2026-09-25
 weight: 2
 type: docs
 tags:
@@ -49,6 +49,64 @@ Ticket manipulation, impersonation of privileged users, or use of production ser
 Correlate Kerberos service ticket requests with the requesting identity, source host, destination service, and normal application behavior. Review unusual request volume and requests that do not fit the expected service relationship. Detection should account for legitimate batch jobs and application patterns rather than treating every ticket request as malicious.
 
 Use managed service accounts where supported, remove unused service principal names, restrict delegation to required services, and limit who can change delegation attributes. Treat domain controllers, certificate authorities, and identity administration hosts as privileged systems with separate administrative paths.
+
+## Step by step directory review
+
+Use a designated domain controller and a read only account. The following commands inventory account metadata only. They do not request service tickets or attempt to authenticate as another identity.
+
+```powershell
+$Server = 'NW-AD-01.northwind.example'
+$Base = 'DC=northwind,DC=example'
+
+Get-ADUser -Server $Server -SearchBase $Base `
+  -LDAPFilter '(servicePrincipalName=*)' `
+  -Properties ServicePrincipalName, PasswordLastSet, ManagedBy, Enabled |
+  Select-Object SamAccountName, Enabled, ManagedBy, PasswordLastSet,
+    @{Name='SPNCount'; Expression={ @($_.ServicePrincipalName).Count }} |
+  Sort-Object SamAccountName
+```
+
+Synthetic output:
+
+```text
+SamAccountName Enabled ManagedBy                         PasswordLastSet       SPNCount
+-------------- ------- ---------                         ---------------       --------
+svc_app01  True    CN=Platform Owners,OU=Groups,...  8/14/2026 9:20:00 AM         2
+svc_reporting  True    CN=Finance Systems,OU=Groups,...  7/02/2026 1:05:00 PM         1
+```
+
+Review delegation separately on computer and user objects. An empty list may mean no configured value, an unreadable attribute, a wrong search base, or a mismatch between the attribute and object type. Preserve the distinction in your notes.
+
+```powershell
+Get-ADComputer -Server $Server -SearchBase $Base -Filter * `
+  -Properties TrustedForDelegation, TrustedToAuthForDelegation,
+    'msDS-AllowedToDelegateTo', PrincipalsAllowedToDelegateToAccount |
+  Where-Object {
+    $_.TrustedForDelegation -or $_.TrustedToAuthForDelegation -or
+    $_.'msDS-AllowedToDelegateTo' -or $_.PrincipalsAllowedToDelegateToAccount
+  } |
+  Select-Object Name, TrustedForDelegation, TrustedToAuthForDelegation,
+    @{Name='AllowedServices'; Expression={$_.'msDS-AllowedToDelegateTo'}},
+    PrincipalsAllowedToDelegateToAccount
+```
+
+Use PowerView only if the engagement requires it and the tool copy has been reviewed. For a read only comparison with the native module, query the same object and attributes rather than running broad user or host hunting functions:
+
+```powershell
+Get-DomainComputer -Domain 'northwind.example' `
+  -Properties samaccountname, dnshostname, useraccountcontrol,
+    msds-allowedtodelegateto |
+  Select-Object SamAccountName, DNSHostName, useraccountcontrol,
+    msds-allowedtodelegateto
+```
+
+The exact object property names depend on the version of PowerView. Confirm them with `Get-Help Get-DomainComputer -Full` and a single in scope object before saving results. Do not use the enumeration to request tickets, inject tickets, impersonate users, or change delegation.
+
+## Interpret the result with logs
+
+For each candidate, document the account, service principal name, delegation mode, listed target services, object owner, and groups that can modify the configuration. Ask the service owner whether the relationship is required. A flag by itself is not proof of a usable access path.
+
+Ask defenders to correlate the query and any separately approved access check with domain controller Kerberos service ticket events, including Event ID 4769 where auditing is enabled. Compare the service, client address, account, and time with application baselines. Avoid treating a single event as malicious without understanding routine service behavior.
 
 ## Further reading
 
